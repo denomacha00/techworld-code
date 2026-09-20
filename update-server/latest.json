@@ -1,6 +1,6 @@
 {
-  "version": "1.9.3",
-  "vsixUrl": "/releases/techword-code-1.9.3.vsix",
-  "notes": "Faster first response and a cleaner Brain panel. (1) Speed: the time-to-first-byte watchdog is now progressive — the first request of a run (and the first after the prompt cache expires) gets room for a real cold start instead of being cut at a flat 25s and re-rolled into another cold start, which was the 'Finding a faster server' retry storm. Re-rolls after it hunt a fast channel quickly (~10s). (2) The Activity panel is now 'Brain' and shows ONLY the model's real reasoning — tool lines, result lines, and status/retry noise no longer bury the one line that matters; empty when there's no reasoning.",
-  "sha256": "1f2be894f3e06d24afd1263954a2a65841b5c7798c8f228c92bcc61d1a5377e5"
+  "version": "1.9.4",
+  "vsixUrl": "/releases/techword-code-1.9.4.vsix",
+  "notes": "Reliability: the release now runs a real webview boot test (loads the panel script, fires every message type, asserts nothing throws) as a hard gate — node --check only catches parse errors, this catches runtime errors too. No behavior change to the panel or the agent; this only makes it impossible to ship a panel that fails to start.",
+  "sha256": "d782f655a85bb124061554cc3ef138eb6784a87f77af1441e6394afa4a2b14b7"
 }
