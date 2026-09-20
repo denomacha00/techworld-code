@@ -2,7 +2,7 @@
   "name": "techword-code",
   "displayName": "Techword Code",
   "description": "Techword Code is an approval-first coding agent powered by Techword API.",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "publisher": "techwordcode",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "resources/icon.png",

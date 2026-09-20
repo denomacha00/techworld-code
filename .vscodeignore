@@ -10,6 +10,10 @@ scripts/**
 proxy/**
 update-server/**
 node_modules/**
+Dockerfile
+railway.json
+nixpacks.toml
+.gitignore
 *.ts
 **/*.map
 esbuild.js
