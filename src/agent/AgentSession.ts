@@ -20,6 +20,18 @@ export interface MemorySink {
 // remember/forget only touch Techword's own memory file — never user code — so they're allowed in Plan mode too.
 const READONLY_TOOLS = new Set(['list_workspace_files', 'read_file', 'search_workspace', 'get_git_status', 'get_git_diff', 'get_diagnostics', 'find_symbol', 'outline_file', 'find_usages', 'code_map', 'ask_user', 'web_fetch', 'preview_in_chat', 'spawn_explorer', 'remember', 'forget']);
 
+// Pure, side-effect-free lookups that are safe to run CONCURRENTLY when the model batches several in one
+// turn (Claude Code / Cursor do exactly this — the biggest per-turn latency win after caching). Excluded
+// on purpose: anything that mutates (edit/propose/run/remember/forget), needs approval, blocks on the user
+// (ask_user), emits ordered UI (preview_in_chat), or already fans out internally (spawn_explorer).
+const PARALLEL_TOOLS = new Set(['list_workspace_files', 'read_file', 'search_workspace', 'get_git_status', 'get_git_diff', 'get_diagnostics', 'find_symbol', 'outline_file', 'find_usages', 'code_map', 'web_fetch']);
+
+/** Only run a batch concurrently when EVERY call is a pure read — one write/approval/ordered call in the
+ *  set forces the whole batch sequential, so nothing races an edit or reorders an approval prompt. */
+export function canRunInParallel(calls: Array<{ name: string }>): boolean {
+  return calls.length > 1 && calls.every((call) => PARALLEL_TOOLS.has(call.name));
+}
+
 export class AgentSession {
   private projectRules = '';
   private memoryText = '';
@@ -227,11 +239,23 @@ export class AgentSession {
         }
         this.autoContinues = 0; // real progress was made; reset the stall guards
         this.emptyResponses = 0;
-        for (const call of calls) {
-          if (this.abortController?.signal.aborted) { return; } // stop between tools when the user hits Stop
-          const result = await this.executeTool(call);
-          this.emit({ type: 'toolResult', summary: summarizeResult(call.name, result) });
-          this.messages.push({ role: 'tool', content: result, tool_call_id: call.id, name: call.name });
+        if (canRunInParallel(calls)) {
+          // All pure reads — run them at once (each streams its own HTTP request / fs read), then push the
+          // results in the ORIGINAL order so every tool_use still lines up with its tool_result for the API.
+          if (this.abortController?.signal.aborted) { return; }
+          const results = await Promise.all(calls.map((call) => this.executeTool(call)));
+          for (let i = 0; i < calls.length; i += 1) {
+            const call = calls[i]!; const result = results[i]!;
+            this.emit({ type: 'toolResult', summary: summarizeResult(call.name, result) });
+            this.messages.push({ role: 'tool', content: result, tool_call_id: call.id, name: call.name });
+          }
+        } else {
+          for (const call of calls) {
+            if (this.abortController?.signal.aborted) { return; } // stop between tools when the user hits Stop
+            const result = await this.executeTool(call);
+            this.emit({ type: 'toolResult', summary: summarizeResult(call.name, result) });
+            this.messages.push({ role: 'tool', content: result, tool_call_id: call.id, name: call.name });
+          }
         }
       }
       throw new Error(`The agent reached its ${this.maxSteps}-step safety limit. Say "continue" to keep going, or raise techwordCode.maxSteps for very large tasks.`);
@@ -394,30 +418,37 @@ export class AgentSession {
     return undefined;
   }
 
-  /** Run one or more read-only sub-agents that explore the codebase and return distilled answers,
-   *  keeping the main conversation's context clean (like Claude Code / Codex subagents).
-   *  Multiple tasks run concurrently — real parallelism, since each streams its own HTTP request. */
+  /** Run one or more sub-agents concurrently that investigate the workspace AND run their own commands
+   *  (tests, builds, git status, grep), each in its own context, returning distilled answers to the main
+   *  agent — exactly how Claude Code / Codex parallel subagents work. Real parallelism: each streams its
+   *  own HTTP request and runs its own tools. Edits stay with the MAIN agent so parallel workers on one
+   *  workspace can't clobber each other's files (the main agent is the single coordinated writer). */
   private async spawnExplorers(tasks: string[]): Promise<string> {
     const clean = tasks.map((task) => task.trim()).filter(Boolean).slice(0, 6);
     if (clean.length === 0) { throw new Error('spawn_explorer needs at least one task.'); }
-    this.emit({ type: 'tool', name: 'spawn_explorer', detail: clean.length === 1 ? clean[0] as string : `${clean.length} explorers in parallel` });
+    this.emit({ type: 'tool', name: 'spawn_explorer', detail: clean.length === 1 ? clean[0] as string : `${clean.length} agents in parallel` });
     if (clean.length === 1) { return this.runExplorer(clean[0] as string, ''); }
     const results = await Promise.all(clean.map((task, index) => this.runExplorer(task, `#${index + 1} `)
-      .catch((error) => `Explorer ${index + 1} failed: ${error instanceof Error ? error.message : String(error)}`)));
-    return clean.map((task, index) => `--- Explorer ${index + 1}: ${task}\n${results[index]}`).join('\n\n');
+      .catch((error) => `Agent ${index + 1} failed: ${error instanceof Error ? error.message : String(error)}`)));
+    return clean.map((task, index) => `--- Agent ${index + 1}: ${task}\n${results[index]}`).join('\n\n');
   }
 
-  /** A single read-only exploration sub-agent. `tag` labels its activity when several run at once. */
+  /** A single sub-agent. It can read/search AND run its own terminal commands (routed through the same
+   *  approval + safety policy as the main agent — no bypass), then reports its findings back. `tag` labels
+   *  its activity when several run at once. It deliberately CANNOT edit files: on a shared workspace the
+   *  main agent applies all edits so parallel workers never race on the same file. */
   private async runExplorer(task: string, tag: string): Promise<string> {
-    // Explorers are read-only summarizers — no reasoning UI, so don't spend thinking tokens on them.
+    // Sub-agents don't show a reasoning UI, so don't spend thinking tokens on them.
     const client = new OpenAICompatibleClient(this.provider, this.apiKey, { ...this.genOptions, thinking: false });
-    const tools = TOOLS.filter((tool) => READONLY_TOOLS.has(tool.name) && tool.name !== 'ask_user' && tool.name !== 'preview_in_chat' && tool.name !== 'spawn_explorer');
+    // Read/search/symbol tools PLUS run_terminal_command (so a worker can run tests/builds/git on its own
+    // and report results), but NOT edit tools — edits are the main agent's job to avoid parallel clobbering.
+    const tools = TOOLS.filter((tool) => (READONLY_TOOLS.has(tool.name) || tool.name === 'run_terminal_command') && tool.name !== 'ask_user' && tool.name !== 'preview_in_chat' && tool.name !== 'spawn_explorer' && tool.name !== 'remember' && tool.name !== 'forget');
     const sub: ChatMessage[] = [
-      { role: 'system', content: 'You are a read-only exploration sub-agent for Techword Code. Investigate the workspace with the available search/read/symbol tools and answer the given question concisely and completely. You cannot edit files or run commands. Return the specific findings the main agent needs (exact file paths, line numbers, symbol names, and a short explanation) — not a plan.' },
+      { role: 'system', content: 'You are a sub-agent for Techword Code working on one focused task in parallel with others. Investigate the workspace with the search/read/symbol tools, and run your OWN terminal commands when useful — run tests, builds, linters, git status/log/diff, grep, ls (each command is approved by the user, same as the main agent). Do NOT edit files and do NOT run state-changing commands (installs, git commit/push, package publishes) — the main agent coordinates all writes so parallel workers never clobber each other. When done, report back concisely and completely: exact file paths, line numbers, symbol names, command results (what passed/failed and the key output lines), and any specific edits you recommend the main agent make — not a vague plan.' },
       { role: 'user', content: task }
     ];
     let findings = '';
-    for (let turn = 0; turn < 15; turn += 1) {
+    for (let turn = 0; turn < 20; turn += 1) {
       if (this.abortController?.signal.aborted) { break; }
       let text = '';
       let calls: ToolCall[] = [];
@@ -430,13 +461,13 @@ export class AgentSession {
       if (calls.length === 0) { break; }
       sub.push({ role: 'assistant', content: text, tool_calls: calls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } })) });
       for (const call of calls) {
-        this.emit({ type: 'tool', name: call.name, detail: `${tag}explorer: ${JSON.stringify(call.arguments).slice(0, 80)}` });
+        this.emit({ type: 'tool', name: call.name, detail: `${tag}agent: ${JSON.stringify(call.arguments).slice(0, 80)}` });
         const result = await this.executeTool(call);
         this.emit({ type: 'toolResult', summary: summarizeResult(call.name, result) });
         sub.push({ role: 'tool', content: result, tool_call_id: call.id, name: call.name });
       }
     }
-    return findings.trim() || 'The exploration finished without a clear answer.';
+    return findings.trim() || 'The sub-agent finished without a clear answer.';
   }
 
   /** Inline any @path references in the prompt by attaching those files' contents. */
@@ -571,7 +602,10 @@ export class AgentSession {
     const approved = await this.gate({ id, kind: 'command', command: proposal.command, cwd: proposal.cwd || 'workspace root', purpose: proposal.purpose });
     if (!approved) { this.approvals.reject(approval.id); return 'The user rejected the terminal command.'; }
     if (!this.approvals.consume(approval.id, proposal)) { return 'The user rejected the terminal command.'; }
-    return this.executor.runCommand(proposal, this.abortController?.signal);
+    // Stream the command's output to the chat as it runs (faded, under the card) so you can watch it work
+    // — not just a tick at the end. Chunks arrive at the OS pipe's chunk granularity (not per line), so
+    // this is coarse enough not to flood the UI; the webview box is capped as a further guard.
+    return this.executor.runCommand(proposal, this.abortController?.signal, (chunk) => this.emit({ type: 'commandOutput', chunk }));
   }
 
   /** Call an external MCP tool, gated by user approval since these servers can have side effects. */

@@ -1,5 +1,5 @@
 {
-  "version": "1.8.2",
-  "vsixUrl": "/releases/techword-code-1.8.2.vsix",
-  "notes": "Test release to confirm online self-update works"
+  "version": "1.8.6",
+  "vsixUrl": "/releases/techword-code-1.8.6.vsix",
+  "notes": "Faster (prompt caching + parallel reads), live terminal output as commands run, fixed commands that could hang forever, and sub-agents now run their own commands in parallel."
 }

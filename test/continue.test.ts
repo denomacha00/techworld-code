@@ -1,6 +1,32 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { intendsToContinue, decideAfterEmptyTurn, EMPTY_RESPONSE_LIMIT, STALL_NUDGE_LIMIT, nudgeMessage } from '../src/agent/AgentSession';
+import { intendsToContinue, decideAfterEmptyTurn, EMPTY_RESPONSE_LIMIT, STALL_NUDGE_LIMIT, nudgeMessage, canRunInParallel } from '../src/agent/AgentSession';
+
+// Parallel read-only tool execution: when the model batches several PURE reads in one turn, run them at
+// once (like Claude Code / Cursor) instead of serially. The safety rule under test: a single write/
+// approval/ordered call anywhere in the batch forces the WHOLE batch sequential, so nothing races an edit.
+
+test('a batch of pure reads runs in parallel', () => {
+  assert.equal(canRunInParallel([{ name: 'read_file' }, { name: 'read_file' }, { name: 'search_workspace' }]), true);
+  assert.equal(canRunInParallel([{ name: 'list_workspace_files' }, { name: 'get_git_diff' }, { name: 'find_symbol' }]), true);
+});
+
+test('one write/side-effect call forces the whole batch sequential', () => {
+  assert.equal(canRunInParallel([{ name: 'read_file' }, { name: 'edit_file' }]), false, 'never race a read against an edit');
+  assert.equal(canRunInParallel([{ name: 'read_file' }, { name: 'run_terminal_command' }]), false);
+  assert.equal(canRunInParallel([{ name: 'read_file' }, { name: 'remember' }]), false);
+});
+
+test('approval- and ordering-sensitive tools are never parallelized', () => {
+  assert.equal(canRunInParallel([{ name: 'read_file' }, { name: 'ask_user' }]), false, 'ask_user blocks on the user');
+  assert.equal(canRunInParallel([{ name: 'read_file' }, { name: 'preview_in_chat' }]), false, 'preview emits ordered UI');
+  assert.equal(canRunInParallel([{ name: 'read_file' }, { name: 'spawn_explorer' }]), false, 'explorers already fan out internally');
+});
+
+test('a single call is not "parallel" — the fast path only helps with 2+', () => {
+  assert.equal(canRunInParallel([{ name: 'read_file' }]), false);
+  assert.equal(canRunInParallel([]), false);
+});
 
 test('detects a cliffhanger that announces an unfinished action', () => {
   for (const text of [

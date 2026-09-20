@@ -176,6 +176,7 @@ export type AgentEvent =
   | { type: 'resetStream' }
   | { type: 'thinking'; text: string }
   | { type: 'tool'; name: string; detail: string }
+  | { type: 'commandOutput'; chunk: string }
   | { type: 'toolResult'; summary: string }
   | { type: 'checkpoint'; id: string; summary: string }
   | { type: 'question'; text: string; options?: string[] }

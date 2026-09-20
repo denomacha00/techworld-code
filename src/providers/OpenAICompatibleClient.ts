@@ -36,6 +36,56 @@ export function isThinkingRejection(status: number, rawDetail: string): boolean 
   return /thinking|budget_tokens|extended.?thinking|reasoning|signature/i.test(rawDetail);
 }
 
+/** A prompt-cache breakpoint. Anthropic caches the whole prefix up to a block tagged with this and
+ *  reuses it on the next request within the 5-minute TTL — a cache READ is ~10× cheaper and lands the
+ *  first byte far sooner than reprocessing the tools + system + history from scratch every turn. */
+type CacheControl = { type: 'ephemeral' };
+
+/** Turn the plain system string into a single cacheable text block. The system prompt + memory + repo
+ *  rules are the largest stable chunk of every request, so caching them is the biggest single speed win. */
+export function withSystemCacheBreakpoint(system: string): Array<{ type: 'text'; text: string; cache_control: CacheControl }> {
+  return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
+}
+
+/** Tag the LAST tool definition so the entire (frozen) tool array caches. Clones — never mutates the
+ *  shared TOOLS constant, or the cache_control would leak into every future request and other clients. */
+export function withToolsCacheBreakpoint(tools: unknown[]): unknown[] {
+  if (tools.length === 0) { return tools; }
+  const out = tools.slice();
+  const last = out[out.length - 1];
+  if (last && typeof last === 'object') {
+    out[out.length - 1] = { ...(last as Record<string, unknown>), cache_control: { type: 'ephemeral' } };
+  }
+  return out;
+}
+
+/** Tag the last block of the last message so the growing conversation (file reads, tool output) caches
+ *  incrementally: each turn writes the new tail and the next turn reads the whole prior prefix cheaply.
+ *  Clones the touched message/parts so the caller's history array is never mutated. */
+export function withMessageCacheBreakpoint<T extends { role: string; content: unknown }>(messages: T[]): T[] {
+  if (messages.length === 0) { return messages; }
+  const out = messages.slice();
+  const i = out.length - 1;
+  const last = out[i];
+  if (!last) { return out; }
+  if (typeof last.content === 'string') {
+    if (!last.content) { return out; } // an empty string block can't carry cache_control
+    out[i] = { ...last, content: [{ type: 'text', text: last.content, cache_control: { type: 'ephemeral' } }] };
+  } else if (Array.isArray(last.content) && last.content.length > 0) {
+    const parts = (last.content as Array<Record<string, unknown>>).map((part) => ({ ...part }));
+    (parts[parts.length - 1] as Record<string, unknown>).cache_control = { type: 'ephemeral' };
+    out[i] = { ...last, content: parts };
+  }
+  return out;
+}
+
+/** Detect a gateway rejection about cache_control, so we can drop caching and retry on the plain path —
+ *  a stricter or older gateway degrades to no-cache instead of hard-failing the task on a 400/422. */
+export function isCacheRejection(status: number, rawDetail: string): boolean {
+  if (status !== 400 && status !== 422) { return false; }
+  return /cache_control|cache control|prompt.?cach|ephemeral|cache_creation/i.test(rawDetail);
+}
+
 /** The request fields that control reasoning/creativity, decided from the client's settings. Extracted so
  *  the speed-critical rule can be unit-tested: the upstream runs slow hidden reasoning UNLESS thinking is
  *  EXPLICITLY disabled, so the default (thinking off) MUST send {type:'disabled'} — never omit it. */
@@ -89,7 +139,7 @@ interface AnthropicEvent {
   error?: { message?: string };
 }
 
-type AnthropicPart = { type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } } | { type: 'tool_use'; id: string; name: string; input: unknown } | { type: 'tool_result'; tool_use_id: string; content: string } | { type: 'thinking'; thinking: string; signature: string } | { type: 'redacted_thinking'; data: string };
+type AnthropicPart = ({ type: 'text'; text: string } | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } } | { type: 'tool_use'; id: string; name: string; input: unknown } | { type: 'tool_result'; tool_use_id: string; content: string } | { type: 'thinking'; thinking: string; signature: string } | { type: 'redacted_thinking'; data: string }) & { cache_control?: { type: 'ephemeral' } };
 interface AnthropicMessage { role: 'user' | 'assistant'; content: string | AnthropicPart[]; }
 
 export interface GenerationOptions {
@@ -110,6 +160,12 @@ export class OpenAICompatibleClient {
   // flips off only if a gateway proves it rejects even the disabled param, so a stricter server degrades
   // to omitting it instead of hard-failing the task.
   private sendDisabledThinking = true;
+  // Prompt caching. On by default: tags the tools + system + last message with cache_control so the
+  // gateway reuses the prefix on the next turn (a cache read is ~10× cheaper and much faster to first
+  // byte than reprocessing everything). Flips off for the rest of this client's life only if a gateway
+  // proves it rejects cache_control, so an older/stricter server degrades to the plain path instead of
+  // hard-failing the task. Prompt caching is GA on the Messages API — no beta header needed.
+  private sendCacheControl = true;
   // One continuous retry counter across the whole outage, so the user sees a number that climbs
   // (attempt 1, 2, 3…) proving it's actively retrying — not a "1/6" that resets and looks stuck.
   // Only a fully-completed turn resets it; a fresh connection mid-outage does not.
@@ -154,15 +210,28 @@ export class OpenAICompatibleClient {
   async *streamCompletion(messages: ChatMessage[], tools: unknown[], signal?: AbortSignal): AsyncGenerator<StreamDelta> {
     const { system, msgs } = this.toAnthropic(messages);
     const maxTokens = this.options.maxTokens && this.options.maxTokens > 0 ? this.options.maxTokens : MAX_TOKENS;
-    const body: Record<string, unknown> = { model: this.requireModel(), max_tokens: maxTokens, messages: msgs, stream: true };
-    // Reasoning/creativity fields. CRITICAL for speed: the default (thinking off) sends {type:'disabled'},
-    // which is ≈10× faster to first byte than omitting the param — see thinkingParams.
-    const think = thinkingParams({ thinkingOn: this.thinkingOn, maxTokens, sendDisabledThinking: this.sendDisabledThinking, thinkingBudget: this.options.thinkingBudget, temperature: this.options.temperature });
-    const thinkOn = think.thinking?.type === 'enabled';
-    if (think.thinking) { body.thinking = think.thinking; }
-    if (typeof think.temperature === 'number') { body.temperature = think.temperature; }
-    if (system) { body.system = system; }
-    if (Array.isArray(tools) && tools.length > 0) { body.tools = tools; body.tool_choice = { type: 'auto' }; }
+    const hasTools = Array.isArray(tools) && tools.length > 0;
+    // Extended thinking stays on the enabled path for the whole call (the session recreates the client to
+    // turn it off), so thinkOn — which only gates the first-byte cap — is safe to compute once.
+    const thinkOn = thinkingParams({ thinkingOn: this.thinkingOn, maxTokens, sendDisabledThinking: this.sendDisabledThinking, thinkingBudget: this.options.thinkingBudget, temperature: this.options.temperature }).thinking?.type === 'enabled';
+    // Rebuildable so the graceful-degrade paths below (thinking rejected, cache_control rejected) can
+    // reconstruct the exact request after flipping a flag, instead of hand-patching the body object.
+    // thinkingParams is recomputed each build so a flipped sendDisabledThinking drops {type:'disabled'}.
+    const buildBody = (): Record<string, unknown> => {
+      const b: Record<string, unknown> = { model: this.requireModel(), max_tokens: maxTokens, stream: true };
+      // Reasoning/creativity fields. CRITICAL for speed: the default (thinking off) sends {type:'disabled'},
+      // which is ≈10× faster to first byte than omitting the param — see thinkingParams.
+      const think = thinkingParams({ thinkingOn: this.thinkingOn, maxTokens, sendDisabledThinking: this.sendDisabledThinking, thinkingBudget: this.options.thinkingBudget, temperature: this.options.temperature });
+      if (think.thinking) { b.thinking = think.thinking; }
+      if (typeof think.temperature === 'number') { b.temperature = think.temperature; }
+      // Cache breakpoints go on the LARGEST STABLE prefix first (tools, then system), and last on the
+      // message tail so the growing history caches incrementally. Applied only when caching is on.
+      b.messages = this.sendCacheControl ? withMessageCacheBreakpoint(msgs) : msgs;
+      if (system) { b.system = this.sendCacheControl ? withSystemCacheBreakpoint(system) : system; }
+      if (hasTools) { b.tools = this.sendCacheControl ? withToolsCacheBreakpoint(tools) : tools; b.tool_choice = { type: 'auto' }; }
+      return b;
+    };
+    let body = buildBody();
 
     // Persist through transient failures: retry network errors and 429/5xx with backoff.
     // Do NOT retry auth/quota/bad-request errors — those need the user to act.
@@ -230,12 +299,22 @@ export class OpenAICompatibleClient {
         if (thinkOn) { throw new ThinkingUnsupportedError('Extended thinking is not available on this gateway — continuing without it.'); }
         if (this.sendDisabledThinking) {
           this.sendDisabledThinking = false;
-          delete body.thinking;
+          body = buildBody();
           yield { status: 'Adjusting request for this server…' };
           attempt -= 1; // a one-time config re-roll, not a network failure — don't spend the retry budget
           await this.sleep(200, signal);
           continue;
         }
+      }
+      // The gateway rejected cache_control (older/stricter server). Drop prompt caching for the rest of
+      // this client's life and retry on the plain path — degrade quietly instead of failing the task.
+      if (isCacheRejection(response.status, detail) && this.sendCacheControl) {
+        this.sendCacheControl = false;
+        body = buildBody();
+        yield { status: 'Adjusting request for this server…' };
+        attempt -= 1; // a one-time config re-roll, not a network failure — don't spend the retry budget
+        await this.sleep(200, signal);
+        continue;
       }
       if (RETRY_STATUS.has(response.status) && attempt < MAX_RETRIES && !signal?.aborted) {
         // 520/522/523/524 are the proxy hop timing out on the upstream, not the provider being "busy".

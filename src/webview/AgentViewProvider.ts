@@ -22,6 +22,7 @@ type OutMessage =
   | { kind: 'thinking'; text: string }
   | { kind: 'resetStream' }
   | { kind: 'tool'; name: string; detail: string }
+  | { kind: 'commandOutput'; chunk: string }
   | { kind: 'toolResult'; summary: string }
   | { kind: 'cmdResult'; token: string; output: string; failed: boolean }
   | { kind: 'checkpoint'; id: string; summary: string }
@@ -116,6 +117,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       case 'assistantDelta': this.post({ kind: 'delta', text: event.text }); break;
       case 'resetStream': this.post({ kind: 'resetStream' }); break;
       case 'tool': this.post({ kind: 'tool', name: event.name, detail: event.detail }); break;
+      case 'commandOutput': this.post({ kind: 'commandOutput', chunk: event.chunk }); break; // live terminal output, streamed faded under the command card
       case 'toolResult': this.post({ kind: 'toolResult', summary: event.summary }); this.scheduleSave(); break; // persist mid-turn — a tool round just landed in history
       case 'checkpoint': this.post({ kind: 'checkpoint', id: event.id, summary: event.summary }); this.scheduleSave(); break;
       case 'question': this.post({ kind: 'question', text: event.text, options: event.options }); break;

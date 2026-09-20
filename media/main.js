@@ -471,10 +471,29 @@
     add(card);
   }
 
+  // Live terminal output, streamed under the running command's card as faded text (like Claude Code) —
+  // so you SEE what a command is doing while it runs, not just a tick at the end. Chunks append in place;
+  // the box scrolls with its tail and is capped so a noisy build can't grow the DOM without bound.
+  const CMD_OUT_MAX = 20000;
+  function addCommandOutput(chunk) {
+    if (!lastToolCard || !chunk) { return; }
+    let box = lastToolCard.querySelector('.tool-cmd-output');
+    if (!box) {
+      box = document.createElement('pre');
+      box.className = 'tool-cmd-output';
+      lastToolCard.append(box);
+    }
+    box.textContent = (box.textContent + chunk).slice(-CMD_OUT_MAX);
+    box.scrollTop = box.scrollHeight;
+    scroll();
+  }
+
   function addToolResult(summary) {
     settleLastTool();
     if (summary) { logActivity('↳ ' + summary, 'tr-done'); }
     if (!lastToolCard || !summary) { return; }
+    // A command already streamed its full output live — don't repeat it as a summary row underneath.
+    if (lastToolCard.querySelector('.tool-cmd-output')) { scroll(); return; }
     const res = document.createElement('div');
     res.className = 'tool-result';
     res.textContent = summary;
@@ -1173,6 +1192,7 @@
         else { stopThinking(); showStatus(m.message); pinWork(m.message); logActivity(m.message); }
         break;
       case 'tool': addTool(m.name, m.detail); break;
+      case 'commandOutput': addCommandOutput(m.chunk); break;
       case 'toolResult': addToolResult(m.summary); break;
       case 'checkpoint': addCheckpoint(m.id, m.summary); logActivity('✓ Applied: ' + (m.summary || 'changes'), 'tr-done'); break;
       case 'question': waitingForAnswer = true; addQuestion(m.text, m.options); break;

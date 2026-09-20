@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
@@ -287,29 +287,55 @@ export class WorkspaceToolExecutor {
 
   /** Apply approved edits and record a checkpoint of the prior state so the change can be reverted. */
   async applyEdits(edits: FileEdit[]): Promise<string> {
-    const workspaceEdit = new vscode.WorkspaceEdit();
     const before: Array<{ path: string; before: string | null }> = [];
     for (const edit of edits) {
       const target = this.uri(edit.path);
       const existing = await this.readExisting(target);
       this.assertExpectedHash(edit, existing);
       before.push({ path: edit.path, before: existing ?? null });
-      if (edit.operation === 'delete') { workspaceEdit.deleteFile(target, { ignoreIfNotExists: false }); }
-      else if (edit.operation === 'rename') {
+      if (edit.operation === 'delete') {
+        try { await vscode.workspace.fs.delete(target, { useTrash: false, recursive: false }); }
+        catch (error) { throw new Error(`Could not delete ${edit.path}: ${error instanceof Error ? error.message : String(error)}`); }
+      } else if (edit.operation === 'rename') {
         if (!edit.renameTo) { throw new Error(`Cannot rename ${edit.path}: renameTo is missing.`); }
-        before.push({ path: edit.renameTo, before: (await this.readExisting(this.uri(edit.renameTo))) ?? null });
-        workspaceEdit.renameFile(target, this.uri(edit.renameTo), { overwrite: false, ignoreIfExists: false });
+        const renameTarget = this.uri(edit.renameTo);
+        before.push({ path: edit.renameTo, before: (await this.readExisting(renameTarget)) ?? null });
+        try { await vscode.workspace.fs.rename(target, renameTarget, { overwrite: false }); }
+        catch (error) { throw new Error(`Could not rename ${edit.path} → ${edit.renameTo}: ${error instanceof Error ? error.message : String(error)}`); }
+      } else {
+        // create or modify: write the full content straight to disk. vscode.workspace.applyEdit only
+        // updates the in-memory buffer for text edits, so a createFile+insert (or a replace on a file
+        // that isn't open) left 0 bytes on disk unless something happened to save it — that was the
+        // "edit reported as applied but the file is empty" bug. A direct disk write always lands and
+        // cannot be clobbered by a stale editor tab.
+        await this.writeContent(target, edit.content);
+        // Guard against a silent empty write: confirm the bytes actually reached disk.
+        if (edit.content.length > 0) {
+          const readBack = await this.readExisting(target);
+          if (!readBack) { throw new Error(`Writing ${edit.path} did not persist to disk (found 0 bytes). Nothing was saved.`); }
+        }
       }
-      else if (edit.operation === 'create') { workspaceEdit.createFile(target, { ignoreIfExists: false }); workspaceEdit.insert(target, new vscode.Position(0, 0), edit.content); }
-      else { workspaceEdit.replace(target, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(Number.MAX_SAFE_INTEGER, 0)), edit.content); }
     }
-    if (!await vscode.workspace.applyEdit(workspaceEdit)) { throw new Error('VS Code rejected the approved file edit.'); }
     const id = randomUUID();
     this.checkpoints.set(id, { id, files: before });
     // Show the edited file so the user sees the change land in the editor.
     const shown = edits.find((edit) => edit.operation !== 'delete');
     if (shown) { void this.reveal(this.uri(shown.operation === 'rename' && shown.renameTo ? shown.renameTo : shown.path), true); }
     return id;
+  }
+
+  /** Write full file content to disk reliably, whether or not the file is open in an editor.
+   *  A dirty (unsaved) editor buffer would overwrite a raw disk write on its next save, so in that one
+   *  case we apply through the buffer and save it. Otherwise we write straight to disk — which also
+   *  creates any missing parent folders, and which VS Code auto-reloads into a clean open tab. */
+  private async writeContent(uri: vscode.Uri, content: string): Promise<void> {
+    const open = vscode.workspace.textDocuments.find((doc) => !doc.isClosed && doc.uri.toString() === uri.toString());
+    if (open?.isDirty) {
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(uri, new vscode.Range(new vscode.Position(0, 0), new vscode.Position(open.lineCount + 1, 0)), content);
+      if (await vscode.workspace.applyEdit(edit) && await open.save()) { return; }
+    }
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(content, 'utf8'));
   }
 
   /** Restore files to the state captured in a checkpoint (undo an applied edit). */
@@ -326,21 +352,75 @@ export class WorkspaceToolExecutor {
     return `Reverted ${checkpoint.files.length} file(s) to the state before that change.`;
   }
 
-  async runCommand(proposal: CommandProposal, signal?: AbortSignal): Promise<string> {
+  /**
+   * Run a shell command, STREAMING its output as it arrives (onChunk) instead of buffering silently until
+   * the end. Two long-standing pains this fixes: (1) you saw only a tick + a one-line summary, never the
+   * live terminal output; now every stdout/stderr chunk is surfaced. (2) a command that blocks on an
+   * interactive prompt (classically `git push` waiting for credentials) hung forever — the buffered
+   * execFile timeout killed only the cmd.exe wrapper, leaving the real child (git + its credential helper)
+   * alive with the pipe open, so the call never returned. Now: git is forced NON-INTERACTIVE (it fails
+   * fast with a clear message instead of waiting on a prompt that can never be answered here), the timeout
+   * kills the WHOLE process tree (taskkill /T on Windows), and Stop does the same.
+   */
+  async runCommand(proposal: CommandProposal, signal?: AbortSignal, onChunk?: (chunk: string) => void): Promise<string> {
     const root = this.root();
     const cwd = proposal.cwd ? this.uri(proposal.cwd).fsPath : root.uri.fsPath;
     const timeout = Math.min(Math.max(proposal.timeoutMs ?? 120000, 1000), 600000);
-    const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/sh';
-    const args = process.platform === 'win32' ? ['/d', '/s', '/c', proposal.command] : ['-lc', proposal.command];
-    try {
-      // `signal` lets Stop kill a running command's child process.
-      const { stdout, stderr } = await execFileAsync(shell, args, { cwd, timeout, windowsHide: true, signal, killSignal: 'SIGTERM', env: { ...process.env, ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined } });
-      return redact(`${stdout}${stderr ? `\n${stderr}` : ''}`).slice(0, this.outputLimit);
-    } catch (error) {
-      if (signal?.aborted) { return 'Command stopped by user.'; }
-      const detail = error instanceof Error ? error.message : String(error);
-      return redact(`Command failed: ${detail}`).slice(0, this.outputLimit);
-    }
+    const isWin = process.platform === 'win32';
+    const shell = isWin ? 'cmd.exe' : '/bin/sh';
+    const args = isWin ? ['/d', '/s', '/c', proposal.command] : ['-lc', proposal.command];
+    // Force non-interactive so a credential/passphrase prompt fails fast instead of hanging forever with
+    // no output. GIT_TERMINAL_PROMPT=0 makes git error out; GIT_ASKPASS/SSH pointed at a no-op refuses
+    // GUI/askpass popups too. Also strip our own provider keys so a spawned tool can't read them.
+    const env: NodeJS.ProcessEnv = { ...process.env, ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo', GCM_INTERACTIVE: 'Never', GIT_PAGER: 'cat', PAGER: 'cat' };
+
+    return await new Promise<string>((resolve) => {
+      let out = '';
+      let over = false; // stop appending once we've hit the output cap (still drain the process)
+      let settled = false;
+      // detached on POSIX makes the child its own process-group leader, so process.kill(-pid) can take
+      // down the whole tree (git + credential helper, npm + sub-processes) instead of just the shell.
+      const child = spawn(shell, args, { cwd, windowsHide: true, env, detached: !isWin });
+
+      const append = (data: Buffer): void => {
+        if (over) { return; }
+        const piece = redact(data.toString());
+        if (out.length + piece.length > this.outputLimit) {
+          out += piece.slice(0, Math.max(0, this.outputLimit - out.length)) + '\n…(output truncated)';
+          over = true;
+        } else {
+          out += piece;
+        }
+        if (onChunk) { try { onChunk(piece); } catch { /* UI push best-effort */ } }
+      };
+      child.stdout?.on('data', append);
+      child.stderr?.on('data', append);
+
+      // Kill the WHOLE tree — a bare child.kill() leaves grandchildren (git's credential helper, an npm
+      // sub-process) alive holding the pipe open, which is exactly what made commands hang.
+      const killTree = (): void => {
+        if (child.pid === undefined) { child.kill('SIGKILL'); return; }
+        if (isWin) { try { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); } catch { child.kill('SIGKILL'); } }
+        else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
+      };
+
+      const finish = (suffix: string): void => {
+        if (settled) { return; }
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        const body = out.trim() ? out : '(no output)';
+        resolve(redact(`${body}${suffix}`).slice(0, this.outputLimit));
+      };
+
+      const timer = setTimeout(() => { killTree(); finish(`\n\nCommand timed out after ${Math.round(timeout / 1000)}s and was stopped. If it was waiting for input (a password, a credential prompt, a confirmation), it can't be answered here — re-run it non-interactively (e.g. a token in the URL, --yes, --no-input).`); }, timeout);
+      const onAbort = (): void => { killTree(); finish('\n\nCommand stopped by user.'); };
+      if (signal?.aborted) { killTree(); finish('\n\nCommand stopped by user.'); return; }
+      signal?.addEventListener('abort', onAbort, { once: true });
+
+      child.on('error', (error) => finish(`\n\nCommand failed to start: ${error instanceof Error ? error.message : String(error)}`));
+      child.on('close', (code) => finish(code && code !== 0 ? `\n\n(exit code ${code})` : ''));
+    });
   }
 
   private root(): vscode.WorkspaceFolder {

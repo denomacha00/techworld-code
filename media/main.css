@@ -366,6 +366,17 @@ select { max-width: 180px; }
 }
 .tool-card .tool-result::before { content: '↳ '; }
 
+/* Live terminal output streamed under a running command, faded (like Claude Code). Scrolls with its
+   tail while the command runs; capped height so a long build stays contained. */
+.tool-card .tool-cmd-output {
+  margin: 6px 0 2px; padding: 8px 10px;
+  border-top: 1px dashed var(--border);
+  white-space: pre-wrap; word-break: break-word;
+  font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px;
+  color: var(--vscode-descriptionForeground); opacity: 0.85;
+  max-height: 260px; overflow-y: auto;
+}
+
 /* A small spinner on the active tool card so you SEE it working while the tool runs (walking files,
    running a command). It's removed the moment the result lands or the next action starts. */
 .tool-card .tool-head { position: relative; }
