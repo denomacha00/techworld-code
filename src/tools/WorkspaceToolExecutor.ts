@@ -16,7 +16,12 @@ export class WorkspaceToolExecutor {
   private readonly checkpoints = new Map<string, Checkpoint>();
   private excludeGlob: string | undefined;
 
-  constructor(private readonly outputLimit: number) {}
+  /** `baseDir`, when set, roots this executor at an isolated git WORKTREE outside the workspace (for a
+   *  worker agent), instead of the VS Code workspace folder. In that mode file listing/search go through
+   *  git (findFiles is workspace-scoped and can't see the worktree), reads/writes/commands run against
+   *  the worktree path, and no files are opened in the editor. The default (no baseDir) is the main
+   *  agent's behavior and is completely unchanged. */
+  constructor(private readonly outputLimit: number, private readonly baseDir?: string) {}
 
   /** Turn a set of search/replace edits into a single modify FileEdit, validating each match. */
   async computeStringEdit(path: string, edits: Array<{ oldText: string; newText: string; replaceAll?: boolean }>): Promise<FileEdit> {
@@ -55,9 +60,31 @@ export class WorkspaceToolExecutor {
     return previews;
   }
 
+  /** Convert a worker's worktree changes into edits against the REAL workspace, so they can be applied
+   *  through the normal approval gate. A file whose worktree content equals the current workspace content
+   *  is dropped (the worker didn't actually change it vs your files — e.g. it was only the replayed
+   *  baseline), so the user only ever reviews genuine net changes. create vs modify is decided by whether
+   *  the file currently exists in the workspace, so integrating never fights the executor's own guards. */
+  async toFileEdits(changes: Array<{ path: string; content: string | null }>): Promise<FileEdit[]> {
+    const edits: FileEdit[] = [];
+    for (const change of changes) {
+      let uri: vscode.Uri;
+      try { uri = this.uri(change.path); } catch { continue; } // skip protected/escaping paths
+      const existing = await this.readExisting(uri);
+      if (change.content === null) {
+        if (existing !== undefined) { edits.push({ path: change.path, content: '', operation: 'delete' }); }
+        continue;
+      }
+      if (existing === change.content) { continue; } // no net change vs the workspace — drop it
+      edits.push({ path: change.path, content: change.content, operation: existing === undefined ? 'create' : 'modify' });
+    }
+    return edits;
+  }
+
   async listFiles(path = '.', depth = 3): Promise<string> {
     const root = this.root();
     const base = this.cleanRelative(path);
+    if (this.baseDir) { return this.gitListFiles(base); }
     const pattern = new vscode.RelativePattern(root, base === '.' ? '**/*' : `${base}/**/*`);
     const entries = await vscode.workspace.findFiles(pattern, await this.getExcludeGlob(), Math.min(1000, Math.max(1, depth) * 300));
     return entries.map((uri) => vscode.workspace.asRelativePath(uri, false)).filter((item) => !this.denied(item)).slice(0, 1000).join('\n');
@@ -100,6 +127,7 @@ export class WorkspaceToolExecutor {
 
   /** Open a file in the editor so the user can watch reads/edits happen. `focus` brings it to front. */
   private async reveal(uri: vscode.Uri, focus: boolean): Promise<void> {
+    if (this.baseDir) { return; } // never surface throw-away worktree files in the editor
     if (!vscode.workspace.getConfiguration('techwordCode').get<boolean>('openFilesInEditor', true)) { return; }
     const options = { preview: true, preserveFocus: !focus, viewColumn: vscode.ViewColumn.One };
     try {
@@ -254,6 +282,7 @@ export class WorkspaceToolExecutor {
 
   /** Search file contents across the workspace for a string or regex; returns path:line matches. */
   async searchText(query: string, options: { regex?: boolean; include?: string; maxResults?: number }): Promise<string> {
+    if (this.baseDir) { return this.gitGrep(query, options); }
     const root = this.root();
     const scope = options.include?.trim() ? this.cleanRelative(options.include) : '';
     const glob = !scope ? '**/*' : scope.includes('*') ? scope : `${scope}/**/*`;
@@ -424,10 +453,47 @@ export class WorkspaceToolExecutor {
   }
 
   private root(): vscode.WorkspaceFolder {
+    // Worker mode: root at the isolated worktree. The worktree only exists because the real workspace
+    // was trusted, so we still gate on that trust before doing anything.
+    if (this.baseDir) {
+      if (!vscode.workspace.isTrusted) { throw new Error('Workspace tools are disabled until you trust this workspace.'); }
+      return { uri: vscode.Uri.file(this.baseDir), name: 'techword-worktree', index: 0 };
+    }
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { throw new Error('Open a trusted workspace folder before using workspace tools.'); }
     if (!vscode.workspace.isTrusted) { throw new Error('Workspace tools are disabled until you trust this workspace.'); }
     return folder;
+  }
+
+  /** Raw git stdout in the current root (no redaction/truncation), for parsing file lists / grep. */
+  private async gitRaw(args: string[]): Promise<string> {
+    const { stdout } = await execFileAsync('git', args, { cwd: this.root().uri.fsPath, timeout: 30000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+    return stdout;
+  }
+
+  /** Worktree-mode file list via git (tracked + new untracked, minus ignored). */
+  private async gitListFiles(base: string): Promise<string> {
+    const out = await this.gitRaw(['ls-files', '--cached', '--others', '--exclude-standard']);
+    const prefix = base && base !== '.' ? `${base.replace(/\/+$/, '')}/` : '';
+    const files = out.split(/\r?\n/).map((line) => line.trim().replace(/\\/g, '/')).filter(Boolean)
+      .filter((file) => !prefix || file.startsWith(prefix))
+      .filter((file) => !this.denied(file))
+      .slice(0, 1000);
+    return files.join('\n');
+  }
+
+  /** Worktree-mode content search via git grep (searches tracked + untracked). */
+  private async gitGrep(query: string, options: { regex?: boolean; include?: string; maxResults?: number }): Promise<string> {
+    const max = Math.min(Math.max(options.maxResults ?? 100, 1), 300);
+    const args = ['grep', '-n', '-I', '-i', '--untracked', '--no-color', options.regex ? '-E' : '-F', '-e', query];
+    if (options.include?.trim()) { args.push('--', options.include.trim()); }
+    let out = '';
+    try { out = await this.gitRaw(args); }
+    catch (error) { out = typeof (error as { stdout?: unknown }).stdout === 'string' ? (error as { stdout: string }).stdout : ''; } // exit 1 = no matches
+    const lines = out.split(/\r?\n/).filter(Boolean)
+      .filter((line) => { const file = line.split(':')[0]?.replace(/\\/g, '/'); return !file || !this.denied(file); })
+      .slice(0, max);
+    return redact(lines.length ? lines.join('\n') : 'No matches found.').slice(0, this.outputLimit);
   }
 
   private uri(path: string): vscode.Uri {

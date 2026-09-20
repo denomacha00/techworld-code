@@ -2,6 +2,7 @@ import type { AgentEvent, Attachment, ApprovalRequest, ChatMessage, CommandPropo
 import { OpenAICompatibleClient, isTerminalError, ThinkingUnsupportedError, type GenerationOptions } from '../providers/OpenAICompatibleClient';
 import type { ApprovalBroker } from '../security/ApprovalBroker';
 import type { WorkspaceToolExecutor } from '../tools/WorkspaceToolExecutor';
+import type { WorktreeManager, Worktree, WorktreeChange } from './WorktreeManager';
 import type { McpHub } from '../mcp/McpHub';
 import { parseEdits, SYSTEM_PROMPT, TOOLS } from './ToolDefinitions';
 import { randomUUID } from 'node:crypto';
@@ -10,6 +11,31 @@ import { randomUUID } from 'node:crypto';
 export type ApprovalGate = (request: ApprovalRequest) => Promise<boolean>;
 export type ContextMode = 'auto' | 'ask';
 export type AgentMode = 'plan' | 'act';
+
+/** Optional worktree support so worker agents can edit + test in isolation and hand results back for the
+ *  main agent to integrate. Injected (not built here) to keep AgentSession free of vscode/fs specifics. */
+export interface WorktreeSupport {
+  manager: WorktreeManager;
+  /** Build an executor rooted at a worktree directory (WorkspaceToolExecutor(limit, dir)). */
+  makeExecutor: (dir: string) => WorkspaceToolExecutor;
+}
+
+/** Tools a worktree worker gets: the read/search set PLUS real editing, all scoped to its own worktree.
+ *  It edits and tests in isolation; the main agent integrates the result into the real workspace. */
+const WORKER_EDIT_TOOLS = new Set(['read_file', 'list_workspace_files', 'search_workspace', 'get_git_diff', 'get_git_status', 'edit_file', 'propose_file_edits', 'run_terminal_command']);
+
+const WORKER_IMPLEMENT_PROMPT = [
+  'You are a worker sub-agent for Techword Code, implementing ONE focused task in parallel with other workers. You have your OWN private, isolated git worktree — a full checkout of the project seeded with the current code. Nothing you do here touches the user\'s real files or the other workers, so work confidently and completely; the main agent integrates your result into the real workspace afterwards.',
+  'Work to a high standard — be as careful, rigorous, and thorough as Claude Code:',
+  '• Never guess. Before you change anything, READ the actual code with read_file/search_workspace and understand how it works. Match the project\'s existing style, naming, libraries, and patterns. If a symbol or file is involved, look at it — do not assume its shape.',
+  '• Make correct, clean changes — no bugs, no dead code, no half-measures. Prefer small surgical edits (edit_file) over large rewrites. Handle the real cases, not just the happy path.',
+  '• ALWAYS verify, but verify SMART. After editing, run the project\'s real type-check, tests, and linter with run_terminal_command and READ the output. Do not stop at "should work"; if something fails, diagnose the true cause and fix it, then run again until it genuinely passes.',
+  '• Your worktree is a clean checkout — it does NOT contain installed dependencies (node_modules, venv, vendor) or build output, because those are gitignored. Prefer verification that does not need a full install (a type-check, a focused unit test, reading the code). Only run an install if your task truly requires it. If a full dependency-heavy build/test isn\'t practical here, say so clearly and note that it should be run after integration — do not report success you could not actually verify.',
+  '• Do not give up. Keep working autonomously until your assigned task is fully done and verified. If one approach fails ~3 times, step back and try a fundamentally different one instead of repeating it. Only stop when the work is complete and proven, or when it is truly impossible — and then say exactly why.',
+  '• Stay strictly within your assigned task and area so you don\'t overlap other workers.',
+  '• Do NOT run git commit/push or any command that affects the shared remote or network (publish, deploy) — only local edits and local verification. The main agent handles version control and integration.',
+  'When done, give clear, honest feedback: what you changed and why, the key files, exactly what you ran to verify, and the result (passed/failed with the important output). Be truthful about anything you could not verify. Your file edits are captured automatically from the worktree, so you don\'t need to paste the whole diff.'
+].join('\n');
 
 /** How the session saves/removes durable memories. The provider backs this with the on-disk MemoryStore. */
 export interface MemorySink {
@@ -61,7 +87,8 @@ export class AgentSession {
     private readonly executor: WorkspaceToolExecutor,
     private readonly approvals: ApprovalBroker,
     private readonly emit: (event: AgentEvent) => void,
-    private readonly gate: ApprovalGate
+    private readonly gate: ApprovalGate,
+    private readonly worktrees?: WorktreeSupport
   ) {}
 
   get running(): boolean { return this.abortController !== undefined; }
@@ -423,14 +450,143 @@ export class AgentSession {
    *  agent — exactly how Claude Code / Codex parallel subagents work. Real parallelism: each streams its
    *  own HTTP request and runs its own tools. Edits stay with the MAIN agent so parallel workers on one
    *  workspace can't clobber each other's files (the main agent is the single coordinated writer). */
-  private async spawnExplorers(tasks: string[]): Promise<string> {
+  private async spawnExplorers(tasks: string[], implement: boolean): Promise<string> {
     const clean = tasks.map((task) => task.trim()).filter(Boolean).slice(0, 6);
     if (clean.length === 0) { throw new Error('spawn_explorer needs at least one task.'); }
-    this.emit({ type: 'tool', name: 'spawn_explorer', detail: clean.length === 1 ? clean[0] as string : `${clean.length} agents in parallel` });
-    if (clean.length === 1) { return this.runExplorer(clean[0] as string, ''); }
-    const results = await Promise.all(clean.map((task, index) => this.runExplorer(task, `#${index + 1} `)
-      .catch((error) => `Agent ${index + 1} failed: ${error instanceof Error ? error.message : String(error)}`)));
-    return clean.map((task, index) => `--- Agent ${index + 1}: ${task}\n${results[index]}`).join('\n\n');
+    // Implement-mode needs a usable git repo to isolate each worker in its own worktree. If there isn't
+    // one (no git, no commits) we fall back to explore-only workers rather than editing the shared tree.
+    const canImplement = implement && this.worktrees !== undefined && await this.worktrees.manager.isUsable().catch(() => false);
+    const kind = canImplement ? 'worktree agent' : 'agent';
+    this.emit({ type: 'tool', name: 'spawn_explorer', detail: clean.length === 1 ? `${kind}: ${clean[0]}` : `${clean.length} ${kind}s in parallel` });
+    if (implement && !canImplement) { this.emit({ type: 'status', message: 'No git repo with commits — running read-only agents instead of isolated editing workers.' }); }
+
+    // Run every worker in parallel (each streams its own request and runs its own tools). A worktree
+    // worker returns its captured file changes too; an explore-only worker returns just findings.
+    const runs = await Promise.all(clean.map((task, index) => {
+      const tag = clean.length > 1 ? `#${index + 1} ` : '';
+      const run = canImplement
+        ? this.runWorktreeWorker(task, tag)
+        : this.runExplorer(task, tag).then((findings) => ({ findings, changes: [] as WorktreeChange[], diffStat: '' }));
+      return run.catch((error) => ({ findings: `Agent ${index + 1} failed: ${error instanceof Error ? error.message : String(error)}`, changes: [] as WorktreeChange[], diffStat: '' }));
+    }));
+
+    // Integrate the workers' changes into the REAL workspace SEQUENTIALLY (never in parallel) so writes
+    // can't race and the user sees an ordered set of approvals — auto-applied in Bypass, reviewed otherwise.
+    const report: string[] = [];
+    for (let index = 0; index < clean.length; index += 1) {
+      const run = runs[index]!;
+      let integration = '';
+      if (run.changes.length > 0) {
+        if (this.abortController?.signal.aborted) { integration = '\nIntegration: skipped (stopped).'; }
+        else {
+          const edits = await this.executor.toFileEdits(run.changes);
+          if (edits.length === 0) { integration = '\nIntegration: no net changes to your files.'; }
+          else {
+            const result = await this.approveEdits(edits, `Integrate agent ${index + 1}: ${clean[index]!.slice(0, 80)}`);
+            integration = `\nIntegration: ${result}`;
+          }
+        }
+      }
+      report.push(`--- Agent ${index + 1}: ${clean[index]}\n${run.findings}${run.diffStat ? `\nChanged files:\n${run.diffStat}` : ''}${integration}`);
+    }
+    return report.join('\n\n');
+  }
+
+  /** A worker that EDITS + TESTS in its own isolated git worktree, then hands its net changes back for the
+   *  main agent to integrate. Its file edits auto-apply INSIDE the worktree (a sandbox — safe, no gate);
+   *  its terminal commands still go through the normal approval gate (Bypass auto-runs them) but run in
+   *  the worktree. The worktree is always cleaned up, even on error or Stop. */
+  private async runWorktreeWorker(task: string, tag: string): Promise<{ findings: string; changes: WorktreeChange[]; diffStat: string }> {
+    const support = this.worktrees!;
+    let wt: Worktree | undefined;
+    try {
+      wt = await support.manager.create();
+      const wexec = support.makeExecutor(wt.dir);
+      const client = new OpenAICompatibleClient(this.provider, this.apiKey, { ...this.genOptions, thinking: false });
+      const tools = TOOLS.filter((tool) => WORKER_EDIT_TOOLS.has(tool.name));
+      const sub: ChatMessage[] = [
+        { role: 'system', content: WORKER_IMPLEMENT_PROMPT },
+        { role: 'user', content: task }
+      ];
+      let findings = '';
+      for (let turn = 0; turn < 30; turn += 1) {
+        if (this.abortController?.signal.aborted) { break; }
+        let text = '';
+        let calls: ToolCall[] = [];
+        for await (const delta of client.streamCompletion(sub, tools, this.abortController?.signal)) {
+          if (delta.text) { text += delta.text; }
+          if (delta.toolCalls) { calls = delta.toolCalls; }
+          if (delta.usage) { this.totalTokens += delta.usage.total; this.emit({ type: 'usage', total: this.totalTokens }); }
+        }
+        if (text.trim()) { findings = text; }
+        if (calls.length === 0) { break; }
+        sub.push({ role: 'assistant', content: text, tool_calls: calls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } })) });
+        for (const call of calls) {
+          if (this.abortController?.signal.aborted) { break; }
+          this.emit({ type: 'tool', name: call.name, detail: `${tag}worktree agent: ${JSON.stringify(call.arguments).slice(0, 80)}` });
+          const result = await this.executeWorkerTool(call, wexec);
+          this.emit({ type: 'toolResult', summary: summarizeResult(call.name, result) });
+          sub.push({ role: 'tool', content: result, tool_call_id: call.id, name: call.name });
+        }
+      }
+      const changes = await support.manager.captureChanges(wt);
+      const diffStat = await support.manager.diffStat(wt);
+      return { findings: findings.trim() || 'The worker finished without a summary.', changes, diffStat };
+    } finally {
+      if (wt) { await support.manager.remove(wt).catch(() => { /* best-effort cleanup */ }); }
+    }
+  }
+
+  /** Execute one tool call for a worktree worker against ITS executor. Edits auto-apply in the worktree
+   *  sandbox (no gate — the user reviews the net result at integration time); commands are gated exactly
+   *  like the main agent's (Bypass auto-runs) but run inside the worktree. */
+  private async executeWorkerTool(call: ToolCall, wexec: WorkspaceToolExecutor): Promise<string> {
+    const args = call.arguments;
+    try {
+      switch (call.name) {
+        case 'read_file':
+          return await wexec.readFile(requiredString(args, 'path'), numberArg(args, 'startLine', 1), numberArg(args, 'endLine', 400));
+        case 'list_workspace_files':
+          return await wexec.listFiles(stringArg(args, 'path', '.'), numberArg(args, 'depth', 3));
+        case 'search_workspace':
+          return await wexec.searchText(requiredString(args, 'query'), { regex: boolArg(args, 'regex', false), include: stringArg(args, 'include', ''), maxResults: numberArg(args, 'maxResults', 100) });
+        case 'get_git_diff':
+          return await wexec.gitDiff(stringArg(args, 'path', ''));
+        case 'get_git_status':
+          return await wexec.gitStatus();
+        case 'edit_file': {
+          const path = requiredString(args, 'path');
+          const rawEdits = Array.isArray(args.edits) ? args.edits : [];
+          const stringEdits = rawEdits.map((item) => {
+            const edit = (item ?? {}) as Record<string, unknown>;
+            return { oldText: typeof edit.oldText === 'string' ? edit.oldText : '', newText: typeof edit.newText === 'string' ? edit.newText : '', replaceAll: edit.replaceAll === true };
+          });
+          const fileEdit = await wexec.computeStringEdit(path, stringEdits);
+          await wexec.applyEdits([fileEdit]);
+          return `Edited ${path} in the isolated worktree.`;
+        }
+        case 'propose_file_edits': {
+          const edits = parseEdits(args);
+          if (edits.length === 0 || edits.length > 20) { throw new Error('A proposal must contain 1–20 edits.'); }
+          await wexec.applyEdits(edits);
+          return `Applied ${edits.length} change(s) in the isolated worktree: ${edits.map((edit) => edit.path).join(', ')}`;
+        }
+        case 'run_terminal_command': {
+          const proposal: CommandProposal = { command: requiredString(args, 'command'), cwd: stringArg(args, 'cwd', ''), purpose: requiredString(args, 'purpose'), timeoutMs: numberArg(args, 'timeoutMs', 120000) };
+          const approval = this.approvals.request(proposal);
+          const id = randomUUID();
+          this.emit({ type: 'tool', name: 'run_terminal_command', detail: proposal.command });
+          const approved = await this.gate({ id, kind: 'command', command: proposal.command, cwd: proposal.cwd || 'worktree', purpose: proposal.purpose });
+          if (!approved) { this.approvals.reject(approval.id); return 'The user rejected the terminal command.'; }
+          if (!this.approvals.consume(approval.id, proposal)) { return 'The user rejected the terminal command.'; }
+          return wexec.runCommand(proposal, this.abortController?.signal, (chunk) => this.emit({ type: 'commandOutput', chunk }));
+        }
+        default:
+          return `Tool error: ${call.name} is not available to a worktree worker.`;
+      }
+    } catch (error) {
+      return `Tool error: ${error instanceof Error ? error.message : String(error)}`;
+    }
   }
 
   /** A single sub-agent. It can read/search AND run its own terminal commands (routed through the same
@@ -532,7 +688,10 @@ export class AgentSession {
         case 'spawn_explorer': {
           const many = Array.isArray(args.tasks) ? args.tasks.filter((t): t is string => typeof t === 'string') : [];
           const tasks = many.length > 0 ? many : [requiredString(args, 'task')];
-          return await this.spawnExplorers(tasks);
+          // implement=true → each worker edits + tests in its own worktree, main integrates. Never in
+          // Plan mode (read-only), where no changes may be made anywhere.
+          const implement = args.implement === true && this.mode === 'act';
+          return await this.spawnExplorers(tasks, implement);
         }
         case 'code_map':
           this.emit({ type: 'tool', name: call.name, detail: stringArg(args, 'path', 'workspace') });

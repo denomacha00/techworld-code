@@ -1,5 +1,5 @@
 {
-  "version": "1.8.6",
-  "vsixUrl": "/releases/techword-code-1.8.6.vsix",
-  "notes": "Faster (prompt caching + parallel reads), live terminal output as commands run, fixed commands that could hang forever, and sub-agents now run their own commands in parallel."
+  "version": "1.9.0",
+  "vsixUrl": "/releases/techword-code-1.9.0.vsix",
+  "notes": "Bypass permissions now truly runs everything unattended with no gating (like Claude Code); a plain git push is no longer blocked. New worktree worker agents: spawn_explorer with implement=true runs parallel agents that edit + test in their own isolated git worktrees, and the main agent integrates each result back through the approval flow."
 }

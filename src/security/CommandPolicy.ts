@@ -28,7 +28,10 @@ const DANGEROUS: Array<{ re: RegExp; reason: string }> = [
   { re: /\b(curl|wget|iwr|invoke-webrequest)\b[^\n|]*\|\s*(sudo\s+)?(sh|bash|zsh|python|node|pwsh|powershell)\b/i, reason: 'pipes a downloaded script straight into a shell' },
   { re: /\bsudo\b/i, reason: 'runs as administrator (sudo)' },
   { re: /\b(npm|pnpm|yarn)\s+publish\b/i, reason: 'publishes a package to a public registry' },
-  { re: /\bgit\s+push\b/i, reason: 'pushes commits to a remote' },
+  // NOTE: a plain `git push` is deliberately NOT blocked — it is a routine action that must run
+  // fluently in Bypass/auto-approve mode. Only history-rewriting force push (above) is blocked. A
+  // normal push falls through to `caution`, so it auto-runs when the user enabled command auto-approve
+  // and still asks in Manual mode. Blocking every push made Bypass mode ask on every `git push`.
   { re: /\b(scp|rsync)\b[^\n]*@/i, reason: 'copies files to a remote host' },
   { re: /\bnc\b\s+-|\bnetcat\b/i, reason: 'raw network connection (netcat)' }
 ];

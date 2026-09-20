@@ -37,6 +37,16 @@ test('writes and installs are caution (need approval unless auto-approve is on)'
   assert.equal(classifyCommand('echo hi > file.txt').level, 'caution'); // redirection is not "safe"
 });
 
+test('a plain git push is caution, not blocked — it must run fluently in Bypass mode', () => {
+  // Regression guard: a blanket `git push` block forced a manual click on every push even in
+  // Bypass/auto-approve mode. Only force push (history rewrite) stays blocked.
+  assert.equal(classifyCommand('git push').level, 'caution');
+  assert.equal(classifyCommand('git push -u origin main').level, 'caution');
+  assert.equal(classifyCommand('git push origin HEAD').level, 'caution');
+  assert.equal(classifyCommand('git push --force origin main').level, 'blocked');
+  assert.equal(classifyCommand('git push -f').level, 'blocked');
+});
+
 test('a chained command is judged by its most dangerous part', () => {
   assert.equal(classifyCommand('git status && rm -rf /').level, 'blocked');
   assert.equal(classifyCommand('ls && npm install').level, 'caution');

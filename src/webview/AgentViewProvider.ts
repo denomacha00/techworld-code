@@ -7,6 +7,7 @@ import type { ProviderRegistry } from '../providers/ProviderRegistry';
 import { OpenAICompatibleClient } from '../providers/OpenAICompatibleClient';
 import { ApprovalBroker } from '../security/ApprovalBroker';
 import { WorkspaceToolExecutor } from '../tools/WorkspaceToolExecutor';
+import { WorktreeManager } from '../agent/WorktreeManager';
 import { classifyCommand } from '../security/CommandPolicy';
 import { McpHub } from '../mcp/McpHub';
 import { labelForModel } from '../TechwordConfig';
@@ -132,10 +133,16 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private requestApproval(request: ApprovalRequest): Promise<boolean> {
+    // Full Bypass = BOTH edits AND commands auto-approved (the composer's "Bypass permissions" mode).
+    // Like Claude Code's bypassPermissions, it means NO restrictions at all: every edit and command
+    // runs unattended, including destructive ones (force push, history rewrite, rm -rf) — that is the
+    // whole point of trusting a project for an overnight autonomous run. So the dangerous-command
+    // safety net below is skipped entirely in full Bypass; it only guards PARTIAL auto-approve (e.g.
+    // just the "run commands" checkbox on without full Bypass).
+    const fullBypass = this.autoApprove.edits && this.autoApprove.commands;
     let auto = (request.kind === 'edits' && this.autoApprove.edits) || ((request.kind === 'command' || request.kind === 'mcp') && this.autoApprove.commands);
     let warning: string | undefined;
-    // Safety net: dangerous commands ALWAYS require a human click, even in auto-approve mode.
-    if (request.kind === 'command') {
+    if (!fullBypass && request.kind === 'command') {
       const blocked = vscode.workspace.getConfiguration('techwordCode').get<string[]>('blockedCommands', []);
       const verdict = classifyCommand(request.command, blocked);
       if (verdict.level === 'blocked') {
@@ -160,7 +167,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     const config = vscode.workspace.getConfiguration('techwordCode');
     if (!this.session) {
       const limit = config.get<number>('maxToolOutputChars', 12000);
-      this.session = new AgentSession(provider, apiKey, new WorkspaceToolExecutor(limit), new ApprovalBroker(), (event) => this.emit(event), (request) => this.requestApproval(request));
+      // Worktree support lets worker agents edit + test in isolation (only when a workspace folder is
+      // open — the worktrees live under a temp dir but are created from this repo). Each worker gets an
+      // executor rooted at its worktree; the main agent integrates results back through the approval gate.
+      const repoRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const worktrees = repoRoot
+        ? { manager: new WorktreeManager(repoRoot), makeExecutor: (dir: string) => new WorkspaceToolExecutor(limit, dir) }
+        : undefined;
+      this.session = new AgentSession(provider, apiKey, new WorkspaceToolExecutor(limit), new ApprovalBroker(), (event) => this.emit(event), (request) => this.requestApproval(request), worktrees);
     } else {
       this.session.setProvider(provider); this.session.setApiKey(apiKey);
     }
@@ -561,7 +575,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (m === 'bypass' && this.currentAgentMode() !== 'bypass') {
           const choice = await vscode.window.showWarningMessage(
             'Turn on Bypass permissions?',
-            { modal: true, detail: 'Techword Code will apply file edits and run terminal commands WITHOUT asking you first. Only genuinely dangerous commands (delete, force push, disk format, etc.) will still require a click. Use this only in a project you trust.' },
+            { modal: true, detail: 'Techword Code will apply ALL file edits and run ALL terminal commands WITHOUT asking — including destructive ones (delete, force push, history rewrite, disk changes). Nothing is gated, so it can run fully unattended (e.g. overnight). Use this only in a project you trust.' },
             'Turn on Bypass'
           );
           if (choice !== 'Turn on Bypass') { await this.postState(); break; } // revert the picker
@@ -849,7 +863,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         </button>
         <button class="mode-opt" data-mode="bypass" role="menuitem">
           <span class="mo-name">Bypass permissions</span>
-          <span class="mo-desc">Runs edits and commands without asking. Dangerous commands still need a click.</span>
+          <span class="mo-desc">Runs everything without asking — even destructive commands. For trusted projects and unattended runs.</span>
         </button>
       </div>
     </div>
