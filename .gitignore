@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-test/
+*.map
+
+# Packaged extension artifacts
+*.vsix
+
+# Internal proxy / deployment infra (keeps the upstream provider private — never publish)
+proxy/
+
+# Local scratch / probe scripts (may contain live keys or the upstream domain — never publish)
+tw-probe.js
+tw-models.json
+tw-test-terra.json
+probe*.mjs
+probe*.js
+
+# Agent scaffolding
+.kilo/
+.sixth/
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db

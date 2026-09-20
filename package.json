@@ -1,0 +1,242 @@
+{
+  "name": "techword-code",
+  "displayName": "Techword Code",
+  "description": "Techword Code is an approval-first coding agent powered by Techword API.",
+  "version": "1.7.2",
+  "publisher": "techwordcode",
+  "license": "SEE LICENSE IN LICENSE.txt",
+  "icon": "resources/icon.png",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "coding agent",
+    "assistant",
+    "copilot",
+    "chat",
+    "gpt",
+    "claude",
+    "techword"
+  ],
+  "galleryBanner": {
+    "color": "#1E1B2E",
+    "theme": "dark"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "techwordCode.startTask",
+        "title": "Techword Code: Start Task"
+      },
+      {
+        "command": "techwordCode.configureProvider",
+        "title": "Techword Code: Connect Techword API"
+      },
+      {
+        "command": "techwordCode.selectModel",
+        "title": "Techword Code: Select GPT Model"
+      },
+      {
+        "command": "techwordCode.refreshModels",
+        "title": "Techword Code: Check Techword API"
+      },
+      {
+        "command": "techwordCode.stopAgent",
+        "title": "Techword Code: Stop Agent"
+      },
+      {
+        "command": "techwordCode.explainSelection",
+        "title": "Techword Code: Explain Selection"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "techwordCode",
+          "title": "Techword Code",
+          "icon": "resources/techword.svg"
+        }
+      ]
+    },
+    "views": {
+      "techwordCode": [
+        {
+          "type": "webview",
+          "id": "techwordCode.chat",
+          "name": "Agent Chat"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Techword Code",
+      "properties": {
+        "techwordCode.maxToolOutputChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "maximum": 100000,
+          "description": "Maximum characters returned by a workspace or terminal tool."
+        },
+        "techwordCode.contextMode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ask"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Automatically summarize earlier work and keep going when the context fills up.",
+            "Ask before summarizing so you can approve continuing."
+          ],
+          "description": "What to do when the conversation nears the context limit."
+        },
+        "techwordCode.openFilesInEditor": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open files in the editor as Techword Code reads and edits them, so you can watch the work."
+        },
+        "techwordCode.maxSteps": {
+          "type": "number",
+          "default": 100,
+          "minimum": 10,
+          "maximum": 2000,
+          "description": "Maximum tool steps per task before pausing for a safety check. Raise it for very large, long-running tasks (e.g. overnight builds)."
+        },
+        "techwordCode.maxTokens": {
+          "type": "number",
+          "default": 16384,
+          "minimum": 256,
+          "maximum": 64000,
+          "description": "Maximum tokens the model may generate per reply. If a reply is cut off it continues automatically, but raising this reduces how often that happens on very large file rewrites."
+        },
+        "techwordCode.temperature": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Model creativity. 0 is the most focused/deterministic (best for coding); higher is more varied. Ignored while Show Thinking is on."
+        },
+        "techwordCode.showThinking": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show the model's real reasoning in the Activity panel as it works. Off by default: some providers mishandle extended thinking alongside tool use, which can make the agent describe steps without carrying them out. Turn on only if your provider fully supports extended thinking. Falls back automatically if it doesn't."
+        },
+        "techwordCode.thinkingBudget": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 1024,
+          "maximum": 32000,
+          "description": "How many tokens the model may spend reasoning per turn when Show Thinking is on. Higher means deeper reasoning but more tokens used."
+        },
+        "techwordCode.enableWebFetch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow the agent to fetch web pages (docs, npm) with the web_fetch tool. Turn off to keep it fully offline."
+        },
+        "techwordCode.customInstructions": {
+          "type": "string",
+          "default": "",
+          "description": "Standing instructions added to every task (coding style, conventions, do/don't). Applied on top of any AGENTS.md in the repo."
+        },
+        "techwordCode.contextTokenLimit": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 8000,
+          "maximum": 1000000,
+          "description": "Approximate token size at which Techword Code compacts the conversation to keep working."
+        },
+        "techwordCode.deniedGlobs": {
+          "type": "array",
+          "default": [
+            "**/.git/**",
+            "**/.env",
+            "**/.env.*",
+            "**/*secret*",
+            "**/*credential*",
+            "**/*token*"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Workspace paths that Techword Code will not read."
+        },
+        "techwordCode.blockedCommands": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra command patterns (regex or plain text) that always require your manual approval and can never auto-run, on top of the built-in safety list (rm -rf, disk format, force push, curl | sh, sudo, etc.)."
+        },
+        "techwordCode.mcpServers": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "External MCP (Model Context Protocol) servers to connect. Each key is a server name; each value has a `command`, optional `args`, `env`, `cwd`, and `disabled`. Their tools become available to the agent (approval-gated) as `mcp__<server>__<tool>`. Example: `{ \"filesystem\": { \"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"] } }`",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "command"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "Executable to launch the server (e.g. npx, node, python, uvx)."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments passed to the command."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Extra environment variables for the server process."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the server process."
+              },
+              "disabled": {
+                "type": "boolean",
+                "description": "Set true to keep the server configured but not start it."
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "check": "tsc --noEmit",
+    "lint": "eslint -c eslint.config.mjs src test",
+    "test": "npm run check && tsc -p tsconfig.test.json && node --test \"dist-test/test/**/*.test.js\"",
+    "package": "npm run build && vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/vscode": "1.96.0",
+    "@typescript-eslint/eslint-plugin": "8.18.0",
+    "@typescript-eslint/parser": "8.18.0",
+    "@vscode/vsce": "3.2.1",
+    "esbuild": "0.24.0",
+    "eslint": "9.17.0",
+    "javascript-obfuscator": "^4.1.1",
+    "typescript": "5.7.2"
+  }
+}

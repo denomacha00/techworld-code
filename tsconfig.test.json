@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-test",
+    "noEmit": false
+  },
+  "include": [
+    "src/security/Redaction.ts",
+    "src/security/ApprovalBroker.ts",
+    "src/TechwordConfig.ts",
+    "test/**/*.ts"
+  ]
+}
