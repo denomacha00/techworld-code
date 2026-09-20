@@ -133,16 +133,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private requestApproval(request: ApprovalRequest): Promise<boolean> {
-    // Full Bypass = BOTH edits AND commands auto-approved (the composer's "Bypass permissions" mode).
-    // Like Claude Code's bypassPermissions, it means NO restrictions at all: every edit and command
-    // runs unattended, including destructive ones (force push, history rewrite, rm -rf) — that is the
-    // whole point of trusting a project for an overnight autonomous run. So the dangerous-command
-    // safety net below is skipped entirely in full Bypass; it only guards PARTIAL auto-approve (e.g.
-    // just the "run commands" checkbox on without full Bypass).
-    const fullBypass = this.autoApprove.edits && this.autoApprove.commands;
+    // Auto-approve applies to edits (Edit mode) and commands/MCP (Bypass mode). But a genuinely
+    // dangerous command (rm -rf, disk format, fork bomb, curl|sh, force push…) is NEVER auto-run — not
+    // even in Bypass. This matches CommandPolicy's contract and stops an injected instruction in the
+    // repo/tool output from silently detonating a destructive command overnight. Such a command still
+    // appears in chat with a warning; the human must click. Everything else runs unattended as before.
     let auto = (request.kind === 'edits' && this.autoApprove.edits) || ((request.kind === 'command' || request.kind === 'mcp') && this.autoApprove.commands);
     let warning: string | undefined;
-    if (!fullBypass && request.kind === 'command') {
+    if (request.kind === 'command') {
       const blocked = vscode.workspace.getConfiguration('techwordCode').get<string[]>('blockedCommands', []);
       const verdict = classifyCommand(request.command, blocked);
       if (verdict.level === 'blocked') {
@@ -244,6 +242,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
    *  user sees it happen live) AND runs captured so the output can be streamed back into chat as faded
    *  text under the command — like Claude Code. The user's click is the confirmation; no extra prompt. */
   private async runChatCommand(command: string, token: string): Promise<void> {
+    // The command text comes from model output, so a Run click on a genuinely dangerous command must
+    // confirm first (the click alone shouldn't detonate an rm -rf the model happened to print). Ordinary
+    // commands run straight away — the click is the confirmation.
+    const blocked = vscode.workspace.getConfiguration('techwordCode').get<string[]>('blockedCommands', []);
+    const verdict = classifyCommand(command, blocked);
+    if (verdict.level === 'blocked') {
+      const proceed = await vscode.window.showWarningMessage(
+        'Run this command?',
+        { modal: true, detail: `This looks dangerous${verdict.reason ? ` — ${verdict.reason}` : ''}:\n\n${command}\n\nOnly run it if you are certain.` },
+        'Run anyway'
+      );
+      if (proceed !== 'Run anyway') { this.post({ kind: 'cmdResult', token, output: 'Cancelled — command not run.', failed: false }); return; }
+    }
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     // Echo it into a visible terminal so the run is transparent (this is the "runs in the terminal" part).
     try { const terminal = vscode.window.createTerminal({ name: 'Techword', cwd }); terminal.show(); terminal.sendText(command, true); } catch { /* terminal is best-effort */ }
@@ -251,7 +262,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     try {
       const executor = new WorkspaceToolExecutor(vscode.workspace.getConfiguration('techwordCode').get<number>('maxToolOutputChars', 12000));
       const output = await executor.runCommand({ command, purpose: 'Run from chat', timeoutMs: 600000 });
-      const failed = /^Command failed:/i.test(output.trim());
+      // runCommand tags failures with an exit code / start failure / timeout marker — surface those in red.
+      const failed = /\(exit code \d+\)|failed to start|timed out after/i.test(output);
       this.post({ kind: 'cmdResult', token, output, failed });
     } catch (error) {
       this.post({ kind: 'cmdResult', token, output: error instanceof Error ? error.message : String(error), failed: true });
@@ -575,7 +587,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         if (m === 'bypass' && this.currentAgentMode() !== 'bypass') {
           const choice = await vscode.window.showWarningMessage(
             'Turn on Bypass permissions?',
-            { modal: true, detail: 'Techword Code will apply ALL file edits and run ALL terminal commands WITHOUT asking — including destructive ones (delete, force push, history rewrite, disk changes). Nothing is gated, so it can run fully unattended (e.g. overnight). Use this only in a project you trust.' },
+            { modal: true, detail: 'Techword Code will apply ALL file edits and run terminal commands WITHOUT asking, so it can work unattended (e.g. overnight). A small set of genuinely catastrophic commands (rm -rf, disk format, fork bomb, piping a download into a shell, force push) still asks once as a safety net. Use this only in a project you trust.' },
             'Turn on Bypass'
           );
           if (choice !== 'Turn on Bypass') { await this.postState(); break; } // revert the picker
@@ -756,11 +768,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 <header id="topbar">
   <div class="brand"><span class="dot" id="statusDot"></span><span>Techword Code</span></div>
   <div class="actions">
-    <button id="expandBtn" class="icon winctl" title="Expand / restore width">⛶</button>
-    <button id="minimizeBtn" class="icon winctl" title="Minimize (hide panel)">▁</button>
+    <button id="expandBtn" class="icon winctl" title="Expand / restore width" aria-label="Expand or restore width">⛶</button>
+    <button id="minimizeBtn" class="icon winctl" title="Minimize (hide panel)" aria-label="Minimize (hide panel)">▁</button>
     <select id="modelSelect" title="Model" aria-label="Model"></select>
-    <button id="historyBtn" class="icon" title="Chat history">History</button>
-    <button id="newTaskBtn" class="icon" title="New chat">New</button>
+    <button id="historyBtn" class="icon" title="Chat history" aria-label="Chat history">History</button>
+    <button id="newTaskBtn" class="icon" title="New chat" aria-label="New chat">New</button>
     <div class="more-menu">
       <button id="moreBtn" class="icon" title="More options" aria-haspopup="true" aria-expanded="false">⋯</button>
       <div id="moreDropdown" class="more-dropdown hidden" role="menu">
@@ -833,7 +845,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 </div>
 <section id="transcript" class="transcript hidden" aria-label="Activity transcript">
   <div class="transcript-head">
-    <span>What Techword is doing</span>
     <button id="transcriptClose" class="transcript-close" title="Hide activity">✕</button>
   </div>
   <div id="transcriptList" class="transcript-list"></div>
@@ -867,12 +878,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         </button>
       </div>
     </div>
-    <button id="terminalBtn" class="icon" title="Open a terminal">▣</button>
-    <button id="changesBtn" class="icon" title="View changes (diff)">⌥</button>
-    <button id="previewBtn" class="icon" title="Preview the current file">◱</button>
-    <button id="attachBtn" class="icon" title="Attach files or images">📎</button>
-    <button id="sendBtn">Send</button>
-    <button id="stopBtn" class="secondary hidden">Stop</button>
+    <button id="terminalBtn" class="icon" title="Open a terminal" aria-label="Open a terminal">▣</button>
+    <button id="changesBtn" class="icon" title="View changes (diff)" aria-label="View changes (diff)">⌥</button>
+    <button id="previewBtn" class="icon" title="Preview the current file" aria-label="Preview the current file">◱</button>
+    <button id="attachBtn" class="icon" title="Attach files or images" aria-label="Attach files or images">📎</button>
+    <button id="sendBtn" aria-label="Send message">Send</button>
+    <button id="stopBtn" class="secondary hidden" aria-label="Stop the agent">Stop</button>
     <span id="usage" class="usage"></span>
     <span id="ctxRing" class="ctx-ring hidden" title="Context used">
       <svg viewBox="0 0 18 18" width="16" height="16" aria-hidden="true">

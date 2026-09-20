@@ -18,6 +18,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { execSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
@@ -71,10 +72,12 @@ for (const file of fs.readdirSync(releasesDir)) {
 fs.copyFileSync(path.join(root, vsixName), path.join(releasesDir, vsixName));
 console.log(`  ✓ staged ${vsixName} in update-server/releases/`);
 
-// 5. write the manifest the extension checks
-const manifest = { version, vsixUrl: `/releases/${vsixName}`, notes };
+// 5. write the manifest the extension checks — include the .vsix SHA-256 so the client verifies the
+//    download's integrity before installing (a tampered/corrupt package is refused).
+const sha256 = crypto.createHash('sha256').update(fs.readFileSync(path.join(releasesDir, vsixName))).digest('hex');
+const manifest = { version, vsixUrl: `/releases/${vsixName}`, notes, sha256 };
 fs.writeFileSync(path.join(root, 'update-server', 'latest.json'), JSON.stringify(manifest, null, 2) + '\n');
-console.log('  ✓ updated update-server/latest.json');
+console.log(`  ✓ updated update-server/latest.json (sha256 ${sha256.slice(0, 12)}…)`);
 
 // 6. commit + push — Railway redeploys, clients self-update
 console.log('\n▶ Committing and pushing…');

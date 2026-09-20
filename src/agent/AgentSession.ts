@@ -382,12 +382,17 @@ export class AgentSession {
     return true;
   }
 
-  /** Summarize older messages into a compact note so the window shrinks but the work is remembered. */
+  /** Summarize older messages into a compact note so the window shrinks but the work is remembered.
+   *  The kept tail is cut at a real user-turn boundary and the summary is folded INTO that leading user
+   *  message — so the compacted history still starts with a user turn and never orphans a tool_result
+   *  (both of which the Anthropic Messages API rejects, which used to fail the very next request). */
   private async compact(client: OpenAICompatibleClient): Promise<void> {
     const system = this.messages[0];
-    const recent = this.messages.slice(-4);
-    const older = this.messages.slice(1, -4);
-    if (older.length === 0 || !system) { return; }
+    if (!system) { return; }
+    const cut = chooseCompactionCut(this.messages.map((message) => message.role), 4);
+    if (cut < 2) { return; } // no earlier history to summarize, or no safe user boundary to cut at
+    const older = this.messages.slice(1, cut);
+    const recent = this.messages.slice(cut); // recent[0] is guaranteed a real 'user' turn
     this.emit({ type: 'status', message: 'Compacting context…' });
     const summaryRequest: ChatMessage[] = [
       system,
@@ -401,7 +406,9 @@ export class AgentSession {
       }
     } catch { return; /* if summarization fails, keep full history rather than lose it */ }
     if (!summary.trim()) { return; }
-    this.messages = [system, { role: 'assistant', content: `[Summary of earlier work in this task]\n${summary}` }, ...recent.filter((message) => message.role !== 'system')];
+    const lead = recent[0]!;
+    recent[0] = { ...lead, content: prependText(lead.content, `[Summary of earlier work in this task]\n${summary}\n\n`) };
+    this.messages = [system, ...recent];
     this.lastTurnTokens = 0;
     this.emit({ type: 'compacted', message: 'Context compacted — earlier work summarized, memory kept.' });
   }
@@ -432,6 +439,10 @@ export class AgentSession {
   private identityAnswer(prompt: string): string | undefined {
     const p = prompt.trim();
     if (p.length > 160) { return undefined; }
+    // Don't hijack a prompt that ALSO asks for real work (e.g. "who are you, and fix this bug"). If it
+    // carries a coding task, fall through to the model so the task actually gets done; the streaming
+    // name-scrub and the system prompt still keep the identity correct.
+    if (/\b(fix|add|create|build|make|write|implement|refactor|change|update|run|test|debug|generate|install|delete|remove|rename|optimi[sz]e|convert|migrate|analy[sz]e|open|edit)\b|\b(bug|error|file|function|code|feature|test|endpoint|component|script)\b/i.test(p)) { return undefined; }
     // "Who made/developed/owns you", "your developer", "how do I contact the developer" → reveal developer + contact.
     const asksDeveloper = /\b(who\s+(made|built|created|developed|designed|owns|trained)\s+you|who'?s\s+your\s+(developer|creator|maker|author|owner)|your\s+(developer|creator|maker|author|owner)|who\s+is\s+behind\s+(you|techword)|how\s+(can|do)\s+i\s+(contact|reach)\s+(you|the\s+developer|techword|denis)|contact\s+(the\s+)?(developer|techword))\b/i.test(p);
     if (asksDeveloper) {
@@ -848,6 +859,26 @@ export function nudgeMessage(n: number): string {
   if (n <= 1) { return 'Continue. Carry out the next step now by calling the appropriate tool — do not stop until the task is complete and verified. If you truly need my input, call ask_user; if the task is genuinely finished, say so with a short final summary.'; }
   if (n <= 3) { return 'You described what you would do but did not do it. Call the tool now. Do not restate the plan — act on it. If the task is actually finished, give a one-line final summary; if you need my input, call ask_user.'; }
   return 'Stop describing and act. Your ONLY valid next output is a tool call that makes real progress on the task — no prose, no plan, no restating. (If and only if the task is genuinely complete, reply with a short final summary; if you truly cannot proceed without me, call ask_user.)';
+}
+
+/** Pick where to cut history for compaction: an index into `roles` that starts the kept tail. It MUST be
+ *  a real user turn so the compacted conversation still begins with a user message and never splits an
+ *  assistant tool_use from its tool_result — the two invariants the Anthropic Messages API enforces.
+ *  Prefers a boundary near `keepTarget` messages from the end; returns -1 when there's no safe cut. */
+export function chooseCompactionCut(roles: string[], keepTarget: number): number {
+  const len = roles.length;
+  const target = Math.max(2, len - Math.max(1, keepTarget));
+  // Prefer the user boundary closest to (but at or before) the target — keeps roughly keepTarget messages.
+  for (let i = target; i >= 2; i -= 1) { if (roles[i] === 'user') { return i; } }
+  // Otherwise the nearest user boundary after the target — keeps fewer, but is still a valid cut.
+  for (let i = target + 1; i <= len - 1; i += 1) { if (roles[i] === 'user') { return i; } }
+  return -1; // no user turn to cut at (e.g. one long tool chain) — don't risk an invalid sequence
+}
+
+/** Prepend text to a message's content, whether it's a plain string or multimodal parts. */
+function prependText(content: string | ContentPart[], text: string): string | ContentPart[] {
+  if (typeof content === 'string') { return text + content; }
+  return [{ type: 'text', text }, ...content];
 }
 
 /** Guarantees the UI gets EXACTLY ONE terminal signal per task, no matter how the run loop exits.

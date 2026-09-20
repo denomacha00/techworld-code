@@ -1,5 +1,6 @@
 {
-  "version": "1.9.0",
-  "vsixUrl": "/releases/techword-code-1.9.0.vsix",
-  "notes": "Bypass permissions now truly runs everything unattended with no gating (like Claude Code); a plain git push is no longer blocked. New worktree worker agents: spawn_explorer with implement=true runs parallel agents that edit + test in their own isolated git worktrees, and the main agent integrates each result back through the approval flow."
+  "version": "1.9.1",
+  "vsixUrl": "/releases/techword-code-1.9.1.vsix",
+  "notes": "Reliability + safety pass: fixes a context-compaction bug that could fail long runs; keeps genuinely dangerous commands gated even in Bypass; SSRF guard on web fetch; stronger secret redaction; verified self-update (.vsix checksum); plus UI fixes (working Expand/Minimize, smarter autoscroll, real LCS diffs, ordered lists/blockquotes, cleaner Activity panel).",
+  "sha256": "f1e3a3ea7c77455597f17541dca0fea650753ab2282aae40c06cdc7dc69c4fae"
 }

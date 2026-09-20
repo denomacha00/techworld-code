@@ -10,6 +10,16 @@ export interface UpdateManifest {
   vsixUrl: string;
   /** Optional human release notes shown in the "update available" prompt. */
   notes?: string;
+  /** Optional SHA-256 (hex) of the .vsix. When present, the download is verified against it before
+   *  install, so a tampered/corrupt package is refused instead of installed. */
+  sha256?: string;
+}
+
+/** Normalize a manifest hash field to a lowercase 64-char hex SHA-256, or undefined if it isn't one. */
+export function normalizeSha256(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') { return undefined; }
+  const hex = raw.trim().toLowerCase().replace(/^sha256[:=]/, '');
+  return /^[0-9a-f]{64}$/.test(hex) ? hex : undefined;
 }
 
 /**
@@ -55,7 +65,9 @@ export function parseManifest(raw: unknown): UpdateManifest | undefined {
   if (!vsixUrl) { return undefined; }
   const notes = typeof obj.notes === 'string' ? obj.notes
     : typeof obj.releaseNotes === 'string' ? obj.releaseNotes : undefined;
-  return { version: version.replace(/^v/i, ''), vsixUrl, notes };
+  const sha256 = normalizeSha256(obj.sha256 ?? obj.hash ?? obj.sha);
+  // Only attach sha256 when present so a manifest without it stays exactly { version, vsixUrl, notes }.
+  return sha256 ? { version: version.replace(/^v/i, ''), vsixUrl, notes, sha256 } : { version: version.replace(/^v/i, ''), vsixUrl, notes };
 }
 
 /**

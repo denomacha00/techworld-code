@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { createHash } from 'node:crypto';
 import { TECHWORD_UPDATE_URL } from '../TechwordConfig';
 import { isNewerVersion, parseManifest, resolveVsixUrl, type UpdateManifest } from './updateLogic';
 
@@ -92,6 +93,12 @@ export class UpdateChecker {
           if (!response.ok) { throw new Error(`download failed (HTTP ${response.status})`); }
           const bytes = new Uint8Array(await response.arrayBuffer());
           if (bytes.byteLength < 1000) { throw new Error('downloaded file is too small to be a valid package'); }
+          // If the manifest published a SHA-256, verify the bytes match before installing — a tampered or
+          // corrupted package is refused rather than installed. (No hash → install as before, size-checked.)
+          if (manifest.sha256) {
+            const actual = createHash('sha256').update(bytes).digest('hex');
+            if (actual !== manifest.sha256) { throw new Error('the download did not match the expected checksum and was not installed'); }
+          }
           // Write into the extension's own global storage (always writable), then install from there.
           await vscode.workspace.fs.createDirectory(this.context.globalStorageUri);
           const target = vscode.Uri.joinPath(this.context.globalStorageUri, `techword-code-${manifest.version}.vsix`);

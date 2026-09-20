@@ -12,6 +12,27 @@ const PREVIEW_CHAR_LIMIT = 60000;
 const SYMBOL_KINDS = ['File', 'Module', 'Namespace', 'Package', 'Class', 'Method', 'Property', 'Field', 'Constructor', 'Enum', 'Interface', 'Function', 'Variable', 'Constant', 'String', 'Number', 'Boolean', 'Array', 'Object', 'Key', 'Null', 'EnumMember', 'Struct', 'Event', 'Operator', 'TypeParameter'];
 function symbolKind(kind: vscode.SymbolKind): string { return SYMBOL_KINDS[kind] ?? 'Symbol'; }
 
+/** True for hosts a fetch must NOT reach: loopback, private, link-local, or unique-local addresses, and
+ *  cloud metadata. Blocks the classic SSRF targets while leaving ordinary public URLs alone. */
+function isBlockedFetchHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  if (!host) { return true; }
+  if (host === 'localhost' || host.endsWith('.localhost') || host === 'metadata.google.internal') { return true; }
+  // IPv6 loopback / unique-local (fc00::/7) / link-local (fe80::/10).
+  if (host === '::1' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')) { return true; }
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (m) {
+    const a = Number(m[1]); const b = Number(m[2]);
+    if (a === 10 || a === 127 || a === 0) { return true; }              // private / loopback / this-host
+    if (a === 169 && b === 254) { return true; }                        // link-local incl. 169.254.169.254 metadata
+    if (a === 172 && b >= 16 && b <= 31) { return true; }               // private
+    if (a === 192 && b === 168) { return true; }                        // private
+    if (a === 100 && b >= 64 && b <= 127) { return true; }              // carrier-grade NAT
+    if (a >= 224) { return true; }                                      // multicast / reserved
+  }
+  return false;
+}
+
 export class WorkspaceToolExecutor {
   private readonly checkpoints = new Map<string, Checkpoint>();
   private excludeGlob: string | undefined;
@@ -220,9 +241,28 @@ export class WorkspaceToolExecutor {
     let target: URL;
     try { target = new URL(url); } catch { throw new Error('That is not a valid URL.'); }
     if (target.protocol !== 'https:' && target.protocol !== 'http:') { throw new Error('Only http(s) URLs can be fetched.'); }
+    // SSRF guard: refuse loopback / private / link-local hosts so the model can't be steered into
+    // reading the cloud metadata endpoint (169.254.169.254), a localhost admin API, or an internal
+    // service and returning its secrets into the transcript.
+    if (isBlockedFetchHost(target.hostname)) { throw new Error('That host is not allowed (localhost, private, or link-local addresses are blocked).'); }
     let response: Response;
+    // Follow redirects MANUALLY so each hop's host is re-checked — otherwise a public URL could 302 to
+    // an internal address and slip past the guard above.
     try {
-      response = await fetch(target.toString(), { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TechwordCode)', Accept: 'text/html,application/json,text/plain,*/*' }, signal: AbortSignal.timeout(20000), redirect: 'follow' });
+      let current = target;
+      let hops = 0;
+      for (;;) {
+        response = await fetch(current.toString(), { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; TechwordCode)', Accept: 'text/html,application/json,text/plain,*/*' }, signal: AbortSignal.timeout(20000), redirect: 'manual' });
+        if (response.status >= 300 && response.status < 400 && response.headers.get('location')) {
+          if (++hops > 5) { return `Fetch of ${url} stopped: too many redirects.`; }
+          const next = new URL(response.headers.get('location') as string, current);
+          if (next.protocol !== 'https:' && next.protocol !== 'http:') { return `Fetch of ${url} stopped: redirect to an unsupported scheme.`; }
+          if (isBlockedFetchHost(next.hostname)) { return `Fetch of ${url} stopped: it redirected to a blocked (internal) host.`; }
+          current = next;
+          continue;
+        }
+        break;
+      }
     } catch (error) { return `Could not fetch ${url}: ${error instanceof Error ? error.message : String(error)}`; }
     if (!response.ok) { return `Fetch of ${url} returned HTTP ${response.status}.`; }
     const contentType = response.headers.get('content-type') ?? '';

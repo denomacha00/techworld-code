@@ -41,6 +41,8 @@
     previewBtn: document.getElementById('previewBtn'),
     moreBtn: document.getElementById('moreBtn'),
     moreDropdown: document.getElementById('moreDropdown'),
+    expandBtn: document.getElementById('expandBtn'),
+    minimizeBtn: document.getElementById('minimizeBtn'),
     workbar: document.getElementById('workbar'),
     workbarText: document.getElementById('workbarText'),
     transcriptBtn: document.getElementById('transcriptBtn'),
@@ -107,13 +109,17 @@
     const lines = escapeHtml(src).split('\n');
     let html = '';
     let inCode = false;
-    let inList = false;
+    let listTag = '';   // '', 'ul' or 'ol' — the open list, so ordered/unordered nest correctly
+    let inQuote = false;
     let codeBuf = '';
     let codeLang = '';
+    const closeList = () => { if (listTag) { html += '</' + listTag + '>'; listTag = ''; } };
+    const closeQuote = () => { if (inQuote) { html += '</blockquote>'; inQuote = false; } };
+    const openList = (tag) => { if (listTag !== tag) { closeList(); html += '<' + tag + '>'; listTag = tag; } };
     for (let raw of lines) {
       const fence = raw.match(/^```(.*)$/);
       if (fence) {
-        if (inList) { html += '</ul>'; inList = false; }
+        closeList(); closeQuote();
         if (inCode) { html += renderCodeBlock(codeLang, codeBuf); inCode = false; codeBuf = ''; codeLang = ''; }
         else { inCode = true; codeBuf = ''; codeLang = fence[1] || ''; }
         continue;
@@ -126,23 +132,32 @@
         .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2">$1</a>');
 
       const h = line.match(/^(#{1,3})\s+(.*)$/);
-      const li = line.match(/^\s*[-*]\s+(.*)$/);
+      const ul = line.match(/^\s*[-*]\s+(.*)$/);
+      const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+      const quote = line.match(/^\s*&gt;\s?(.*)$/); // '>' was escaped to &gt;
       if (h) {
-        if (inList) { html += '</ul>'; inList = false; }
+        closeList(); closeQuote();
         const level = h[1].length + 2;
         html += '<h' + level + '>' + h[2] + '</h' + level + '>';
-      } else if (li) {
-        if (!inList) { html += '<ul>'; inList = true; }
-        html += '<li>' + li[1] + '</li>';
+      } else if (ul) {
+        closeQuote(); openList('ul');
+        html += '<li>' + ul[1] + '</li>';
+      } else if (ol) {
+        closeQuote(); openList('ol');
+        html += '<li>' + ol[1] + '</li>';
+      } else if (quote) {
+        closeList();
+        if (!inQuote) { html += '<blockquote>'; inQuote = true; }
+        html += quote[1] + '<br>';
       } else if (line.trim() === '') {
-        if (inList) { html += '</ul>'; inList = false; }
+        closeList(); closeQuote();
         html += '<br>';
       } else {
-        if (inList) { html += '</ul>'; inList = false; }
+        closeList(); closeQuote();
         html += '<p>' + line + '</p>';
       }
     }
-    if (inList) html += '</ul>';
+    closeList(); closeQuote();
     if (inCode) html += renderCodeBlock(codeLang, codeBuf);
     return html;
   }
@@ -152,11 +167,25 @@
     if (ob) ob.remove();
   }
 
-  function scroll() { el.log.scrollTop = el.log.scrollHeight; }
+  // Autoscroll only when the user is already at (or near) the bottom. If they scroll up to read earlier
+  // output while the model streams, we leave them there instead of yanking them back down every token.
+  let stickToBottom = true;
+  if (el.log) {
+    el.log.addEventListener('scroll', () => {
+      stickToBottom = (el.log.scrollHeight - el.log.scrollTop - el.log.clientHeight) < 80;
+    });
+  }
+  function scroll(force) { if (force || stickToBottom) { el.log.scrollTop = el.log.scrollHeight; } }
+  // The user just acted (sent/picked) — always bring their message and the reply into view.
+  function scrollToBottom() { stickToBottom = true; scroll(true); }
 
   function add(node) { clearOnboard(); el.log.append(node); scroll(); return node; }
 
-  function endAssistant() { flushThinking(); currentAssistant = null; currentRaw = ''; }
+  function endAssistant() {
+    // Render any tokens still queued for the next frame so the finished bubble is complete before we let go.
+    if (renderQueued && currentAssistant) { renderQueued = false; currentAssistant.__raw = currentRaw; currentAssistant.__content.innerHTML = renderMarkdown(currentRaw); }
+    flushThinking(); currentAssistant = null; currentRaw = '';
+  }
   function clearStatus() { stopThinking(); if (statusEl) { statusEl.remove(); statusEl = null; } }
 
   // Lively "thinking" phrases that rotate while the model is working but not yet streaming, so it
@@ -316,13 +345,22 @@
     return wrap;
   }
 
+  // Coalesce bursts of stream tokens into ONE re-render per animation frame. Re-rendering the whole
+  // bubble on every token is O(n²) over a long reply and throws away the DOM (killing text selection)
+  // each time; batching to a frame keeps streaming smooth without changing what's shown.
+  let renderQueued = false;
+  function flushRender() {
+    renderQueued = false;
+    if (!currentAssistant) { return; }
+    currentAssistant.__raw = currentRaw;
+    currentAssistant.__content.innerHTML = renderMarkdown(currentRaw);
+    scroll();
+  }
   function appendDelta(text) {
     clearStatus();
     if (!currentAssistant) { currentAssistant = makeAssistant(); add(currentAssistant); }
     currentRaw += text;
-    currentAssistant.__raw = currentRaw;
-    currentAssistant.__content.innerHTML = renderMarkdown(currentRaw);
-    scroll();
+    if (!renderQueued) { renderQueued = true; requestAnimationFrame(flushRender); }
   }
 
   // ---------- REAL reasoning → Activity transcript ----------
@@ -516,19 +554,41 @@
     add(d);
   }
 
-  // very small line diff: mark lines that changed
+  // A proper line diff via longest-common-subsequence, so duplicate lines, moves, and reordering render
+  // correctly (the old set-membership version collapsed duplicates and mislabelled moved lines).
   function renderDiff(oldText, newText) {
     const a = oldText ? oldText.split('\n') : [];
     const b = newText ? newText.split('\n') : [];
     const container = document.createElement('div');
     container.className = 'diff';
-    const oldSet = new Set(a);
-    const newSet = new Set(b);
-    // removed lines
-    a.forEach((line) => { if (!newSet.has(line)) container.append(diffLine('-', line, 'del')); });
-    // added / unchanged in new order
-    b.forEach((line) => { container.append(diffLine(newSet && !oldSet.has(line) ? '+' : ' ', line, !oldSet.has(line) ? 'add' : '')); });
+    diffLines(a, b).forEach((r) => container.append(diffLine(r.sign, r.text, r.cls)));
     return container;
+  }
+
+  function diffLines(a, b) {
+    const n = a.length, m = b.length;
+    const MAX = 1500; // cap the O(n·m) table so a huge file preview never freezes the panel
+    if (n > MAX || m > MAX) {
+      return a.map((l) => ({ sign: '-', text: l, cls: 'del' }))
+        .concat(b.map((l) => ({ sign: '+', text: l, cls: 'add' })));
+    }
+    const dp = [];
+    for (let i = 0; i <= n; i++) { dp.push(new Uint16Array(m + 1)); }
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    const rows = [];
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) { rows.push({ sign: ' ', text: a[i], cls: '' }); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ sign: '-', text: a[i], cls: 'del' }); i++; }
+      else { rows.push({ sign: '+', text: b[j], cls: 'add' }); j++; }
+    }
+    while (i < n) { rows.push({ sign: '-', text: a[i++], cls: 'del' }); }
+    while (j < m) { rows.push({ sign: '+', text: b[j++], cls: 'add' }); }
+    return rows;
   }
 
   function diffLine(sign, text, cls) {
@@ -694,6 +754,7 @@
           box.querySelectorAll('.q-option').forEach((x) => { x.classList.add('picked'); x.disabled = true; });
           waitingForAnswer = false;
           addUser(opt);
+          scrollToBottom();
           vscode.postMessage({ kind: 'submit', prompt: opt });
           setBusy(true);
         });
@@ -894,7 +955,7 @@
         el.log.append(d);
       }
     });
-    scroll();
+    scrollToBottom();
   }
 
   // The blue context ring (Claude-Code style): fills as the current request fills the context window,
@@ -1019,7 +1080,7 @@
     // posts a 'queued' update that renders the chip; we just clear the box.
     const answering = waitingForAnswer;
     const busy = state.running && !answering;
-    if (!busy) { addUser(text, pendingAtt.filter((a) => a.kind === 'image')); }
+    if (!busy) { addUser(text, pendingAtt.filter((a) => a.kind === 'image')); scrollToBottom(); }
     if (answering) { waitingForAnswer = false; }
     vscode.postMessage({ kind: 'submit', prompt: text });
     el.prompt.value = '';
@@ -1184,7 +1245,7 @@
         // A turn dropped mid-reply and is being retried; discard the half-streamed bubble so the
         // re-sent text doesn't appear twice.
         if (currentAssistant) { currentAssistant.remove(); }
-        currentAssistant = null; currentRaw = ''; resetThinking();
+        currentAssistant = null; currentRaw = ''; renderQueued = false; resetThinking();
         break;
       case 'status':
         // Generic "Working…" keeps the lively rotation going; a specific status replaces it.

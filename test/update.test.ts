@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compareVersions, isNewerVersion, parseManifest, resolveVsixUrl } from '../src/update/updateLogic';
+import { compareVersions, isNewerVersion, normalizeSha256, parseManifest, resolveVsixUrl } from '../src/update/updateLogic';
 
 test('compareVersions orders numerically, not lexically', () => {
   assert.equal(compareVersions('1.7.4', '1.7.3'), 1);
@@ -54,4 +54,22 @@ test('resolveVsixUrl resolves a relative path against the manifest and forces ht
 
 test('resolveVsixUrl refuses a non-web scheme (no file:/data: downloads)', () => {
   assert.equal(resolveVsixUrl('https://up.example.app/latest.json', 'file:///etc/passwd'), undefined);
+});
+
+test('normalizeSha256 accepts a 64-char hex digest and rejects anything else', () => {
+  const digest = 'a'.repeat(64);
+  assert.equal(normalizeSha256(digest), digest);
+  assert.equal(normalizeSha256('SHA256:' + 'B'.repeat(64)), 'b'.repeat(64), 'strips a prefix and lowercases');
+  assert.equal(normalizeSha256('deadbeef'), undefined, 'too short');
+  assert.equal(normalizeSha256('z'.repeat(64)), undefined, 'non-hex');
+  assert.equal(normalizeSha256(undefined), undefined);
+});
+
+test('parseManifest attaches a valid sha256 and drops a bad one', () => {
+  const digest = 'a'.repeat(64);
+  const withHash = parseManifest({ version: '1.9.1', vsixUrl: '/x.vsix', sha256: digest });
+  assert.equal(withHash?.sha256, digest);
+  const badHash = parseManifest({ version: '1.9.1', vsixUrl: '/x.vsix', hash: 'nope' });
+  assert.equal(badHash?.sha256, undefined, 'a malformed hash is ignored, not stored');
+  assert.ok(badHash, 'the manifest is still usable without a hash');
 });

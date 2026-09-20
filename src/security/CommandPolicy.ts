@@ -36,8 +36,11 @@ const DANGEROUS: Array<{ re: RegExp; reason: string }> = [
   { re: /\bnc\b\s+-|\bnetcat\b/i, reason: 'raw network connection (netcat)' }
 ];
 
-// Read-only inspection commands that are safe to run unattended.
-const SAFE_LEADERS = new Set(['ls', 'dir', 'pwd', 'cat', 'less', 'more', 'head', 'tail', 'echo', 'type', 'find', 'grep', 'rg', 'ag', 'fd', 'wc', 'stat', 'file', 'which', 'where', 'whoami', 'date', 'env', 'printenv', 'tree', 'du', 'df', 'ps', 'node', 'python', 'python3', 'go', 'cargo', 'tsc', 'eslint', 'prettier']);
+// Read-only inspection commands that are safe to run unattended. NOTE: language runtimes that execute
+// arbitrary code (node, python, go run, cargo run, ruby, deno, bun as a script host) are deliberately
+// NOT here — `node -e "…"` / `python -c "…"` can do anything, so they fall through to `caution` and are
+// gated unless the user turned auto-approve on. Only genuinely read-only inspectors are listed.
+const SAFE_LEADERS = new Set(['ls', 'dir', 'pwd', 'cat', 'less', 'more', 'head', 'tail', 'echo', 'type', 'find', 'grep', 'rg', 'ag', 'fd', 'wc', 'stat', 'file', 'which', 'where', 'whoami', 'date', 'env', 'printenv', 'tree', 'du', 'df', 'ps', 'tsc', 'eslint']);
 const SAFE_GIT_SUB = new Set(['status', 'diff', 'log', 'show', 'branch', 'remote', 'rev-parse', 'describe', 'blame', 'ls-files', 'config']);
 // A test/build/type-check invocation is safe to run unattended (that's the verify loop).
 const SAFE_SCRIPTS = /\b(test|build|lint|typecheck|type-check|check|tsc|jest|vitest|mocha|pytest|coverage)\b/i;
