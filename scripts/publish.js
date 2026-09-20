@@ -51,9 +51,16 @@ console.log(`\n▶ Publishing Techword Code ${pkg.version} → ${version}\n`);
 pkg.version = version;
 fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
 
+// 1b. Gate the release on the full check (type-check + webview syntax) and tests. The webview script
+//     (media/main.js) is plain JS that tsc never sees, so a syntax error there would otherwise ship a
+//     dead panel — `npm run check` now runs `node --check media/main.js`, and this makes it a release gate.
+console.log('▶ Verifying (type-check, webview syntax, tests)…');
+run('npm test', { stdio: 'inherit' });
+console.log('  ✓ checks and tests passed');
+
 // 2. white-label leak check on an un-obfuscated bundle (plaintext grep of the obfuscated bundle is
 //    always 0, so it must be run against the readable build to be meaningful).
-console.log('▶ Leak check (un-obfuscated bundle)…');
+console.log('\n▶ Leak check (un-obfuscated bundle)…');
 run('node esbuild.js', { env: { ...process.env, SKIP_OBFUSCATE: '1' }, stdio: 'ignore' });
 const bundle = fs.readFileSync(path.join(root, 'dist', 'extension.js'), 'utf8');
 const leaks = ['justwoker', 'replay-aigateway'].filter((needle) => bundle.toLowerCase().includes(needle));

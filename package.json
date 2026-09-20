@@ -2,7 +2,7 @@
   "name": "techword-code",
   "displayName": "Techword Code",
   "description": "Techword Code is an approval-first coding agent powered by Techword API.",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "publisher": "techwordcode",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "resources/icon.png",
@@ -242,7 +242,8 @@
   "scripts": {
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && node --check media/main.js",
+    "check:webview": "node --check media/main.js",
     "lint": "eslint -c eslint.config.mjs src test",
     "test": "npm run check && tsc -p tsconfig.test.json && node --test \"dist-test/test/**/*.test.js\"",
     "package": "npm run build && vsce package --no-dependencies",

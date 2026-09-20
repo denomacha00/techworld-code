@@ -183,7 +183,7 @@
 
   function endAssistant() {
     // Render any tokens still queued for the next frame so the finished bubble is complete before we let go.
-    if (renderQueued && currentAssistant) { renderQueued = false; currentAssistant.__raw = currentRaw; currentAssistant.__content.innerHTML = renderMarkdown(currentRaw); }
+    if (renderScheduled && currentAssistant) { renderScheduled = false; currentAssistant.__raw = currentRaw; currentAssistant.__content.innerHTML = renderMarkdown(currentRaw); }
     flushThinking(); currentAssistant = null; currentRaw = '';
   }
   function clearStatus() { stopThinking(); if (statusEl) { statusEl.remove(); statusEl = null; } }
@@ -348,9 +348,9 @@
   // Coalesce bursts of stream tokens into ONE re-render per animation frame. Re-rendering the whole
   // bubble on every token is O(n²) over a long reply and throws away the DOM (killing text selection)
   // each time; batching to a frame keeps streaming smooth without changing what's shown.
-  let renderQueued = false;
+  let renderScheduled = false;
   function flushRender() {
-    renderQueued = false;
+    renderScheduled = false;
     if (!currentAssistant) { return; }
     currentAssistant.__raw = currentRaw;
     currentAssistant.__content.innerHTML = renderMarkdown(currentRaw);
@@ -360,7 +360,7 @@
     clearStatus();
     if (!currentAssistant) { currentAssistant = makeAssistant(); add(currentAssistant); }
     currentRaw += text;
-    if (!renderQueued) { renderQueued = true; requestAnimationFrame(flushRender); }
+    if (!renderScheduled) { renderScheduled = true; requestAnimationFrame(flushRender); }
   }
 
   // ---------- REAL reasoning → Activity transcript ----------
@@ -1245,7 +1245,7 @@
         // A turn dropped mid-reply and is being retried; discard the half-streamed bubble so the
         // re-sent text doesn't appear twice.
         if (currentAssistant) { currentAssistant.remove(); }
-        currentAssistant = null; currentRaw = ''; renderQueued = false; resetThinking();
+        currentAssistant = null; currentRaw = ''; renderScheduled = false; resetThinking();
         break;
       case 'status':
         // Generic "Working…" keeps the lively rotation going; a specific status replaces it.
