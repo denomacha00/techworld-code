@@ -245,7 +245,8 @@
     "check": "tsc --noEmit",
     "lint": "eslint -c eslint.config.mjs src test",
     "test": "npm run check && tsc -p tsconfig.test.json && node --test \"dist-test/test/**/*.test.js\"",
-    "package": "npm run build && vsce package --no-dependencies"
+    "package": "npm run build && vsce package --no-dependencies",
+    "publish:update": "node scripts/publish.js"
   },
   "devDependencies": {
     "@types/node": "22.10.2",
