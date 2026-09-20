@@ -1,5 +1,5 @@
 {
-  "version": "1.8.1",
-  "vsixUrl": "/releases/techword-code-1.8.1.vsix",
-  "notes": "One-click updates: Techword Code can now update itself from your release server."
+  "version": "1.8.2",
+  "vsixUrl": "/releases/techword-code-1.8.2.vsix",
+  "notes": "Test release to confirm online self-update works"
 }
