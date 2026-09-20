@@ -8,6 +8,13 @@ export const TECHWORD_API_BASE_URL = 'https://techword-api.g9137347.workers.dev'
 export const TECHWORD_PROVIDER_ID = 'techword-api';
 export const TECHWORD_API_KEY_SECRET = 'techwordCode.techwordApiKey';
 
+// Where the extension checks for its own updates. This is YOUR release server (the update-server/ folder,
+// hosted on Railway) — it serves latest.json + the .vsix files. It is your own domain, reveals nothing
+// about the upstream provider, and is safe to ship. After you deploy update-server/ to Railway, replace
+// this with the URL Railway gives you (e.g. https://techword-updates.up.railway.app/latest.json).
+// A user can also override it per-install with the techwordCode.updateUrl setting.
+export const TECHWORD_UPDATE_URL = 'https://techword-updates.up.railway.app/latest.json';
+
 /**
  * Curated catalog of models Techword Code knows how to label nicely.
  * This is only a display catalog: the real list shown to a user is whatever

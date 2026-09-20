@@ -550,7 +550,8 @@ export class AgentSession {
     const id = randomUUID();
     this.emit({ type: 'tool', name: 'propose_file_edits', detail: `${edits.length} file change(s)` });
     const approved = await this.gate({ id, kind: 'edits', summary, previews });
-    if (!approved || !this.approvals.consume(approval.id, edits)) { return 'The user rejected the proposed file changes.'; }
+    if (!approved) { this.approvals.reject(approval.id); return 'The user rejected the proposed file changes.'; }
+    if (!this.approvals.consume(approval.id, edits)) { return 'The user rejected the proposed file changes.'; }
     const checkpointId = await this.executor.applyEdits(edits);
     this.emit({ type: 'checkpoint', id: checkpointId, summary: edits.map((edit) => edit.path).join(', ') });
     return `Approved and applied changes: ${edits.map((edit) => edit.path).join(', ')}`;
@@ -568,7 +569,8 @@ export class AgentSession {
     const id = randomUUID();
     this.emit({ type: 'tool', name: 'run_terminal_command', detail: proposal.command });
     const approved = await this.gate({ id, kind: 'command', command: proposal.command, cwd: proposal.cwd || 'workspace root', purpose: proposal.purpose });
-    if (!approved || !this.approvals.consume(approval.id, proposal)) { return 'The user rejected the terminal command.'; }
+    if (!approved) { this.approvals.reject(approval.id); return 'The user rejected the terminal command.'; }
+    if (!this.approvals.consume(approval.id, proposal)) { return 'The user rejected the terminal command.'; }
     return this.executor.runCommand(proposal, this.abortController?.signal);
   }
 
@@ -583,7 +585,8 @@ export class AgentSession {
     const id = randomUUID();
     this.emit({ type: 'tool', name: qualifiedName, detail: `${tool.server}: ${tool.toolName}` });
     const approved = await this.gate({ id, kind: 'mcp', server: tool.server, tool: tool.toolName, argsJson: argsJson.slice(0, 2000) });
-    if (!approved || !this.approvals.consume(approval.id, proposal)) { return 'The user rejected the MCP tool call.'; }
+    if (!approved) { this.approvals.reject(approval.id); return 'The user rejected the MCP tool call.'; }
+    if (!this.approvals.consume(approval.id, proposal)) { return 'The user rejected the MCP tool call.'; }
     return this.mcp.callTool(qualifiedName, args);
   }
 }

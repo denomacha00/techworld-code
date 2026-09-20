@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { thinkingParams } from '../src/providers/OpenAICompatibleClient';
+import { thinkingParams, shouldCapFirstByte } from '../src/providers/OpenAICompatibleClient';
 
 // THE speed fix. Measured against the real upstream: a turn is ≈10× faster to first byte (~4s vs ~40s)
 // when the request EXPLICITLY sends thinking:{type:'disabled'} instead of omitting the param. Omitting it
@@ -39,4 +39,24 @@ test('thinking ON but maxTokens too small to fit a budget falls back to the fast
 test('an over-large thinking budget is capped below max_tokens', () => {
   const p = thinkingParams({ thinkingOn: true, maxTokens: 4096, sendDisabledThinking: true, thinkingBudget: 999999 });
   assert.deepEqual(p.thinking, { type: 'enabled', budget_tokens: 4096 - 256 });
+});
+
+// The TTFB (time-to-first-byte) cap re-rolls a stuck channel — but only when we can tell fast from slow.
+// With thinking OFF a fast channel answers in a few seconds, so a 25s silence means a bad channel worth
+// dropping. With thinking ON a long first-byte wait is the model reasoning, not a stuck channel, so we
+// must never cut it. And after a few re-rolls the upstream is slow everywhere — stop capping and wait it out.
+
+test('first-byte cap is ON when thinking is off and we still have re-roll budget', () => {
+  assert.equal(shouldCapFirstByte(false, 0), true);
+  assert.equal(shouldCapFirstByte(false, 2), true, 'still under the budget of 3');
+});
+
+test('first-byte cap is OFF once the re-roll budget is spent — the upstream is just slow everywhere', () => {
+  assert.equal(shouldCapFirstByte(false, 3), false, 'budget reached → stop capping, wait it out');
+  assert.equal(shouldCapFirstByte(false, 10), false);
+});
+
+test('first-byte cap is NEVER applied when thinking is on — a long wait is the model reasoning, not a stuck channel', () => {
+  assert.equal(shouldCapFirstByte(true, 0), false);
+  assert.equal(shouldCapFirstByte(true, 2), false);
 });

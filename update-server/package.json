@@ -1,0 +1,13 @@
+{
+  "name": "techword-code-update-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serves the Techword Code release manifest and .vsix downloads for in-app self-update.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

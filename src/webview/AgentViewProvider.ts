@@ -10,7 +10,7 @@ import { WorkspaceToolExecutor } from '../tools/WorkspaceToolExecutor';
 import { classifyCommand } from '../security/CommandPolicy';
 import { McpHub } from '../mcp/McpHub';
 import { labelForModel } from '../TechwordConfig';
-import type { AgentEvent, ApprovalRequest, Attachment, ChatMessage, ContentPart, ConversationMeta, McpServerConfig } from '../types';
+import type { AgentEvent, ApprovalRequest, Attachment, ChatMessage, ContentPart, ConversationMeta, McpServerConfig, StoredConversation } from '../types';
 
 interface DisplayItem { role: 'user' | 'assistant'; text: string; }
 
@@ -70,6 +70,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private readonly memory: MemoryStore;
   private conversationId: string = crypto.randomUUID();
   private conversationCreatedAt: number = Date.now();
+  /** Debounce handle + write-serialization chain for incremental history saves (see scheduleSave/saveCurrent). */
+  private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  private saving: Promise<void> = Promise.resolve();
   /** Set when the user renames the current chat, so saveCurrent() keeps it instead of re-deriving from the first message. */
   private customTitle: string | undefined;
   private autoApprove: { edits: boolean; commands: boolean };
@@ -82,6 +85,10 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // Per-workspace so a project you trust stays trusted, and others don't inherit it. Default off.
     this.autoApprove = context.workspaceState.get<{ edits: boolean; commands: boolean }>('techwordCode.autoApprove', { edits: false, commands: false });
     context.subscriptions.push({ dispose: () => this.mcp.dispose() });
+    // Best-effort flush on shutdown: if a turn is mid-flight when VS Code closes, write what we have now.
+    // VS Code doesn't await async disposables, so this is a safety net on top of the debounced mid-turn
+    // save (scheduleSave) — that keeps worst-case loss to a fraction of a second, this catches the rest.
+    context.subscriptions.push({ dispose: () => { void this.saveCurrent(); } });
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -109,12 +116,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       case 'assistantDelta': this.post({ kind: 'delta', text: event.text }); break;
       case 'resetStream': this.post({ kind: 'resetStream' }); break;
       case 'tool': this.post({ kind: 'tool', name: event.name, detail: event.detail }); break;
-      case 'toolResult': this.post({ kind: 'toolResult', summary: event.summary }); break;
-      case 'checkpoint': this.post({ kind: 'checkpoint', id: event.id, summary: event.summary }); break;
+      case 'toolResult': this.post({ kind: 'toolResult', summary: event.summary }); this.scheduleSave(); break; // persist mid-turn — a tool round just landed in history
+      case 'checkpoint': this.post({ kind: 'checkpoint', id: event.id, summary: event.summary }); this.scheduleSave(); break;
       case 'question': this.post({ kind: 'question', text: event.text, options: event.options }); break;
       case 'preview': this.post({ kind: 'preview', dataUrl: event.dataUrl, name: event.name }); break;
       case 'usage': this.post({ kind: 'usage', total: event.total, window: event.window, limit: event.limit }); break;
-      case 'compacted': this.post({ kind: 'compacted', message: event.message }); break;
+      case 'compacted': this.post({ kind: 'compacted', message: event.message }); this.scheduleSave(); break; // context was rewritten — persist so a reload doesn't lose the summary
       case 'queued': this.post({ kind: 'queued', items: event.items }); break;
       case 'thinking': this.post({ kind: 'thinking', text: event.text }); break; // real reasoning → Activity panel
       case 'error': this.post({ kind: 'error', message: event.message }); break;
@@ -608,12 +615,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.post({ kind: 'attachments', items: this.pendingAttachments.map((a) => ({ id: a.id, name: a.name, kind: a.kind, dataUrl: a.kind === 'image' ? a.dataUrl : undefined })) });
   }
 
+  /** Debounced incremental save. Persists mid-turn (after each tool round) so a long autonomous run that
+   *  is interrupted — window closed, extension host reload, crash — keeps its progress instead of snapping
+   *  back to the last *completed* turn. Without this, an interrupted turn is lost and History drifts backward. */
+  private scheduleSave(): void {
+    if (this.saveTimer) { clearTimeout(this.saveTimer); }
+    this.saveTimer = setTimeout(() => { this.saveTimer = undefined; void this.saveCurrent(); }, 800);
+  }
+
   private async saveCurrent(): Promise<void> {
+    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = undefined; }
     const session = this.session;
     if (!session) { return; }
     const messages = session.getMessages();
     if (!messages.some((message) => message.role === 'user')) { return; }
-    await this.store.save({
+    // Snapshot the state synchronously (before any await), then serialize the write onto a chain so a
+    // debounced mid-turn save and an end-of-turn save can't interleave on the shared conversation index.
+    const record: StoredConversation = {
       id: this.conversationId,
       title: this.customTitle ?? ConversationStore.titleFrom(messages),
       titleCustom: this.customTitle !== undefined,
@@ -622,7 +640,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       workspace: vscode.workspace.workspaceFolders?.[0]?.name,
       messages: this.sanitizeForStorage(messages),
       totalTokens: session.tokens
-    });
+    };
+    this.saving = this.saving.then(() => this.store.save(record)).catch(() => undefined);
+    await this.saving;
   }
 
   /** Drop bulky image data from persisted history to keep globalState small. */

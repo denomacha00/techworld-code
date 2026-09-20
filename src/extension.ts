@@ -2,15 +2,18 @@ import * as vscode from 'vscode';
 import { labelForModel } from './TechwordConfig';
 import { ProviderRegistry } from './providers/ProviderRegistry';
 import { AgentViewProvider } from './webview/AgentViewProvider';
+import { UpdateChecker } from './update/UpdateChecker';
 
 export function activate(context: vscode.ExtensionContext): void {
   const providers = new ProviderRegistry(context);
   const view = new AgentViewProvider(context, providers);
+  const updater = new UpdateChecker(context);
   context.subscriptions.push(vscode.window.registerWebviewViewProvider(AgentViewProvider.viewType, view, { webviewOptions: { retainContextWhenHidden: true } }));
   context.subscriptions.push(
     vscode.commands.registerCommand('techwordCode.configureProvider', () => connectTechwordApi(providers, view)),
     vscode.commands.registerCommand('techwordCode.selectModel', () => selectModel(providers)),
     vscode.commands.registerCommand('techwordCode.refreshModels', () => verifyTechwordApi(providers)),
+    vscode.commands.registerCommand('techwordCode.checkForUpdates', () => updater.check(false)),
     vscode.commands.registerCommand('techwordCode.startTask', async () => {
       view.focus();
       const prompt = await vscode.window.showInputBox({ prompt: 'What should Techword Code build or fix?' });
@@ -24,6 +27,13 @@ export function activate(context: vscode.ExtensionContext): void {
       void vscode.window.showInformationMessage(`Open Techword Code and ask about ${vscode.workspace.asRelativePath(editor.document.uri)}.`);
     })
   );
+
+  // Check for a newer build shortly after startup (silent: quiet if up to date or the server is down),
+  // unless the user turned the startup check off. Delayed so it never competes with activation.
+  if (vscode.workspace.getConfiguration('techwordCode').get<boolean>('checkForUpdatesOnStartup', true)) {
+    const timer = setTimeout(() => { void updater.check(true); }, 8000);
+    context.subscriptions.push({ dispose: () => clearTimeout(timer) });
+  }
 }
 
 async function connectTechwordApi(registry: ProviderRegistry, view: AgentViewProvider): Promise<void> {

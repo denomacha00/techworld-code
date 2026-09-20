@@ -8,6 +8,8 @@ dist-test/
 
 # Packaged extension artifacts
 *.vsix
+# ...but the release server's published .vsix files MUST be committed so Railway serves them.
+!update-server/releases/*.vsix
 
 # Internal proxy / deployment infra (keeps the upstream provider private — never publish)
 proxy/

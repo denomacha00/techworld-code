@@ -1,0 +1,21 @@
+# Railway/Nixpacks build config for THIS repo.
+#
+# Railway would otherwise auto-detect the root package.json (the VS Code EXTENSION) and run its
+# `build` script (node esbuild.js), which needs dev dependencies and produces dist/ — that fails on
+# Railway ("dist error") because Railway isn't building the extension, it's meant to run the tiny
+# update server. This file overrides that: install/build do nothing, and we simply start the server.
+# The server (update-server/server.js) is pure Node standard library — zero dependencies to install.
+#
+# Deploy on Railway with NO "Root Directory" set (leave it blank / repo root); this file does the rest.
+
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["true"]
+
+[phases.build]
+cmds = ["true"]
+
+[start]
+cmd = "node update-server/server.js"

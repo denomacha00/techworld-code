@@ -1,0 +1,2 @@
+# Drop each techword-code-<version>.vsix here before deploying.
+# This folder is served at /releases/<file>.vsix by server.js.

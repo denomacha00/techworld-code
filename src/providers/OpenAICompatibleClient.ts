@@ -12,6 +12,12 @@ const MAX_RETRIES = 6;
 // re-roll, kept separate from MAX_RETRIES so a run of bad rolls never eats the network-error budget.
 const CHANNEL_RETRIES = 10;
 const STREAM_IDLE_MS = 60000; // if no stream data arrives for this long, surface an error instead of hanging
+// Time-to-first-byte watchdog. This upstream withholds response headers until the model starts generating,
+// and channels vary wildly (measured ~4s on a fast channel vs ~37s+ on a stuck one for identical requests).
+// A stuck channel would block in fetch() until the proxy's ~100s origin timeout → 524. So on the fast path
+// we cap the headers wait and re-roll onto a fresh channel — the same thing a manual retry did.
+const TTFB_TIMEOUT_MS = 25000; // headers not here in 25s = a stuck channel (fast channels deliver in <6s)
+const TTFB_REROLL_BUDGET = 3;  // after this many re-rolls the upstream is slow everywhere — stop capping, wait it out
 const DEFAULT_THINKING_BUDGET = 2048; // modest reasoning budget: real thinking in Activity without ballooning cost
 const MIN_THINKING_BUDGET = 1024;     // Anthropic's floor for budget_tokens
 
@@ -51,6 +57,13 @@ export function thinkingParams(input: {
   if (input.sendDisabledThinking) { out.thinking = { type: 'disabled' }; } // the ≈10× speed lever
   if (typeof input.temperature === 'number') { out.temperature = Math.min(1, Math.max(0, input.temperature)); }
   return out;
+}
+
+/** Should this attempt cap the time-to-first-byte and re-roll a stuck channel? Only when thinking is OFF
+ *  (a long first byte is EXPECTED with extended thinking, so never cut it there) and we're still within the
+ *  re-roll budget (past it, the upstream is slow everywhere — stop cutting good connections, wait it out). */
+export function shouldCapFirstByte(thinkingEnabled: boolean, ttfbRerolls: number): boolean {
+  return !thinkingEnabled && ttfbRerolls < TTFB_REROLL_BUDGET;
 }
 
 /** An API error tagged with whether it's worth retrying. `terminal` errors (dead key, no tokens,
@@ -156,17 +169,46 @@ export class OpenAICompatibleClient {
     const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504, 520, 522, 523, 524]);
     let response: Response | undefined;
     let channelRetries = 0;
+    let ttfbRerolls = 0;
+    // One user-abort listener for the whole call. It aborts whichever attempt is in flight (activeController),
+    // and — after a successful fetch — the very controller whose body we're streaming, so a user Stop also
+    // interrupts reader.read() below. { once } auto-removes it when it fires; if it never fires, the finally
+    // at the end of the method removes it. A TTFB timeout aborts activeController directly (not via signal),
+    // so it never consumes this listener.
+    let activeController: AbortController | undefined;
+    const onUserAbort = (): void => activeController?.abort();
+    signal?.addEventListener('abort', onUserAbort, { once: true });
+    try {
     for (let attempt = 0; ; attempt += 1) {
       if (signal?.aborted) { throw new Error('Stopped.'); }
+      activeController = new AbortController();
+      const capFirstByte = shouldCapFirstByte(thinkOn, ttfbRerolls);
+      let ttfbFired = false;
+      let ttfbTimer: ReturnType<typeof setTimeout> | undefined;
+      if (capFirstByte) { const c = activeController; ttfbTimer = setTimeout(() => { ttfbFired = true; c.abort(); }, TTFB_TIMEOUT_MS); }
       try {
         // Accept: text/event-stream tells the gateway (and every proxy hop) this is an SSE request, so
         // it flushes each event as it arrives instead of buffering the whole reply — the same header the
         // Anthropic SDK / Claude Code send. Buffering upstream is a common cause of a slow-to-start stream
         // that then trips a proxy idle-timeout (524) — exactly the retries the user was seeing.
-        response = await fetch(this.endpoint('/messages'), { method: 'POST', headers: { ...this.headers(), 'content-type': 'application/json', Accept: 'text/event-stream' }, signal, body: JSON.stringify(body) });
+        response = await fetch(this.endpoint('/messages'), { method: 'POST', headers: { ...this.headers(), 'content-type': 'application/json', Accept: 'text/event-stream' }, signal: activeController.signal, body: JSON.stringify(body) });
       } catch (error) {
-        if (attempt < MAX_RETRIES && !signal?.aborted) { yield { status: `Connection problem — retrying (attempt ${this.bumpAttempt()})…` }; await this.backoff(attempt, signal); continue; }
+        if (signal?.aborted) { throw new Error('Stopped.'); }
+        // Headers didn't arrive in time: this channel is stuck. Re-roll onto a fresh one (the gateway picks
+        // a new channel each try) on its own budget — exactly what a manual retry did. Don't fail, don't
+        // spend the network-error budget. Once the budget is gone, shouldCapFirstByte() stops capping and
+        // the next attempt just waits the connection out under the idle watchdog instead.
+        if (ttfbFired) {
+          ttfbRerolls += 1;
+          yield { status: `Finding a faster server — retrying (attempt ${this.bumpAttempt()})…` };
+          attempt -= 1;
+          await this.sleep(300, signal);
+          continue;
+        }
+        if (attempt < MAX_RETRIES) { yield { status: `Connection problem — retrying (attempt ${this.bumpAttempt()})…` }; await this.backoff(attempt, signal); continue; }
         throw this.describeNetworkError(error);
+      } finally {
+        if (ttfbTimer) { clearTimeout(ttfbTimer); }
       }
       if (response.ok) { break; }
       const detail = await response.text();
@@ -329,6 +371,12 @@ export class OpenAICompatibleClient {
     if (!stopReason && toolCalls.length > 0) { stopReason = 'tool_use'; }
     this.resetAttempts(); // the turn finished cleanly — the next outage starts counting from 1 again
     yield { toolCalls, thinkingBlocks, usage: { prompt: inputTokens, completion: outputTokens, total: inputTokens + outputTokens }, done: true, stopReason };
+    } finally {
+      // The turn is over (finished, threw, or the caller pressed Stop mid-stream). Drop the listener so it
+      // can't fire against a later request that reuses this signal — { once } only covers the case where it
+      // actually fired, and a clean finish or a thrown error leaves it attached.
+      signal?.removeEventListener('abort', onUserAbort);
+    }
   }
 
   /** Translate the internal (OpenAI-style) history into Anthropic system + messages. */

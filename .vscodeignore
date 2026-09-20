@@ -8,6 +8,7 @@ dist-test/**
 stress/**
 scripts/**
 proxy/**
+update-server/**
 node_modules/**
 *.ts
 **/*.map

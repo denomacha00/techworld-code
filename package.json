@@ -2,7 +2,7 @@
   "name": "techword-code",
   "displayName": "Techword Code",
   "description": "Techword Code is an approval-first coding agent powered by Techword API.",
-  "version": "1.7.2",
+  "version": "1.8.0",
   "publisher": "techwordcode",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "resources/icon.png",
@@ -57,6 +57,10 @@
       {
         "command": "techwordCode.explainSelection",
         "title": "Techword Code: Explain Selection"
+      },
+      {
+        "command": "techwordCode.checkForUpdates",
+        "title": "Techword Code: Check for Updates"
       }
     ],
     "viewsContainers": {
@@ -177,6 +181,21 @@
             "type": "string"
           },
           "description": "Extra command patterns (regex or plain text) that always require your manual approval and can never auto-run, on top of the built-in safety list (rm -rf, disk format, force push, curl | sh, sudo, etc.)."
+        },
+        "techwordCode.checkForUpdatesOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check for a newer Techword Code version shortly after VS Code starts. When a newer build exists you'll be offered a one-click update."
+        },
+        "techwordCode.autoUpdate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically download and install a newer Techword Code version when one is found, then offer to reload. When off, you're asked first before anything is installed."
+        },
+        "techwordCode.updateUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Override the update server URL (the latest.json endpoint). Leave blank to use the built-in Techword release server."
         },
         "techwordCode.mcpServers": {
           "type": "object",
