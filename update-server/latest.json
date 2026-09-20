@@ -1,6 +1,6 @@
 {
-  "version": "1.9.4",
-  "vsixUrl": "/releases/techword-code-1.9.4.vsix",
-  "notes": "Reliability: the release now runs a real webview boot test (loads the panel script, fires every message type, asserts nothing throws) as a hard gate — node --check only catches parse errors, this catches runtime errors too. No behavior change to the panel or the agent; this only makes it impossible to ship a panel that fails to start.",
-  "sha256": "d782f655a85bb124061554cc3ef138eb6784a87f77af1441e6394afa4a2b14b7"
+  "version": "1.9.5",
+  "vsixUrl": "/releases/techword-code-1.9.5.vsix",
+  "notes": "Techword Code 1.9.5.",
+  "sha256": "71950f8a87427e3f16c76fbf60a17b3fe9f29611b9b30b447fe53d221b467686"
 }

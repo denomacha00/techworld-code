@@ -13,10 +13,13 @@ const MAX_RETRIES = 6;
 const CHANNEL_RETRIES = 10;
 const STREAM_IDLE_MS = 60000; // if no stream data arrives for this long, surface an error instead of hanging
 // Time-to-first-byte watchdog. This upstream withholds response headers until the model starts generating,
-// and channels vary wildly (measured ~4s on a fast channel vs a stuck one that never delivers before the
-// proxy's ~100s origin timeout → 524). So on the fast path we cap the headers wait and re-roll onto a fresh
-// channel — the same thing a manual retry did, but automatic.
-const TTFB_REROLL_BUDGET = 3;  // after this many re-rolls the upstream is slow everywhere — stop capping, wait it out
+// and channels are BIMODAL (measured): a healthy channel delivers the first byte in ~4-35s, a dead one
+// never delivers — it hangs until the proxy's ~100-126s origin timeout, then returns 500/524. Re-rolling
+// onto a fresh channel is exactly what a manual retry did, but automatic. Crucially we NEVER stop capping:
+// a dead channel does not recover if you "wait it out", so every attempt is capped and re-rolled. What's
+// bounded instead is the NUMBER of re-rolls — after this many stuck channels in a row we fail cleanly with
+// a "servers busy" message instead of hanging 120s per attempt forever (the retry storm the user hit).
+const MAX_TTFB_REROLLS = 5;  // stuck channels to escape before giving up cleanly (≈ 45s + 5×20s ceiling)
 const DEFAULT_THINKING_BUDGET = 2048; // modest reasoning budget: real thinking in Activity without ballooning cost
 const MIN_THINKING_BUDGET = 1024;     // Anthropic's floor for budget_tokens
 
@@ -108,24 +111,28 @@ export function thinkingParams(input: {
   return out;
 }
 
-/** Should this attempt cap the time-to-first-byte and re-roll a stuck channel? Only when thinking is OFF
- *  (a long first byte is EXPECTED with extended thinking, so never cut it there) and we're still within the
- *  re-roll budget (past it, the upstream is slow everywhere — stop cutting good connections, wait it out). */
-export function shouldCapFirstByte(thinkingEnabled: boolean, ttfbRerolls: number): boolean {
-  return !thinkingEnabled && ttfbRerolls < TTFB_REROLL_BUDGET;
+/** Should this attempt cap the time-to-first-byte and re-roll a stuck channel? Only gated on thinking:
+ *  with extended thinking ON a long first byte is EXPECTED (the model is reasoning), so never cut it.
+ *  With thinking OFF we ALWAYS cap — a stuck channel never recovers by waiting, so every attempt gets a
+ *  deadline and re-rolls onto a fresh channel. The number of re-rolls is bounded separately (see the loop),
+ *  not by turning the cap off — turning it off is what let a dead channel hang 120s and storm retries. */
+export function shouldCapFirstByte(thinkingEnabled: boolean): boolean {
+  return !thinkingEnabled;
 }
 
-/** How long to wait for the first byte before re-rolling, in ms — PROGRESSIVE, not flat. The first probe
- *  (ttfbRerolls === 0) is the most likely to be a real cold prefill: the very first request of a run, or
- *  the first after the 5-minute prompt-cache TTL lapses, must reprocess the whole system+tools+history
- *  from scratch, which legitimately takes longer than a warm turn. Cutting that at a short cap would abort
- *  a request that WOULD have delivered and re-roll into yet another cold prefill — the retry storm the user
- *  saw. So the first probe gets 18s; every re-roll after it gets 10s, because by then we KNOW this prompt
- *  can start fast on a good channel (a fast channel answers in ~4-6s), so a shorter cap hunts one quickly
- *  instead of sinking another 18s into each gamble. Worst case before we stop capping and wait it out:
- *  18 + 10 + 10 = 38s, comfortably under the proxy's ~100s 524. */
+/** How long to wait for the first byte before re-rolling, in ms — PROGRESSIVE, not flat, and the first
+ *  probe is deliberately GENEROUS. The first probe (ttfbRerolls === 0) is almost always a real cold start:
+ *  the first request of a run, or the first after the 5-minute prompt-cache TTL lapses, must reprocess the
+ *  whole system+tools+history from scratch, which legitimately takes 20-35s to first byte. A short cap there
+ *  turns one honest wait into the "Finding a faster server" retry storm. So the first probe waits 45s (long
+ *  enough that a cold-but-healthy channel delivers even on a full 120k-token context, short enough to still
+ *  escape a genuinely dead channel before the proxy's ~100-126s 500/524). Once the first channel has proven
+ *  stuck, re-rolls hunt a healthy channel at 20s each — healthy channels answer in ~4-35s (measured), so 20s
+ *  catches the fast ones fast while still giving a cold re-roll room to prefill. Worst-case wait before we
+ *  give up cleanly: 45 + 5×20 = 145s, all in capped chunks that each escape a dead channel (never one 120s
+ *  hang), ending in a clear "servers busy" error rather than a silent stall. */
 export function firstByteCapMs(ttfbRerolls: number): number {
-  return ttfbRerolls === 0 ? 18000 : 10000;
+  return ttfbRerolls === 0 ? 45000 : 20000;
 }
 
 /** An API error tagged with whether it's worth retrying. `terminal` errors (dead key, no tokens,
@@ -263,7 +270,7 @@ export class OpenAICompatibleClient {
     for (let attempt = 0; ; attempt += 1) {
       if (signal?.aborted) { throw new Error('Stopped.'); }
       activeController = new AbortController();
-      const capFirstByte = shouldCapFirstByte(thinkOn, ttfbRerolls);
+      const capFirstByte = shouldCapFirstByte(thinkOn);
       let ttfbFired = false;
       let ttfbTimer: ReturnType<typeof setTimeout> | undefined;
       if (capFirstByte) { const c = activeController; ttfbTimer = setTimeout(() => { ttfbFired = true; c.abort(); }, firstByteCapMs(ttfbRerolls)); }
@@ -275,12 +282,15 @@ export class OpenAICompatibleClient {
         response = await fetch(this.endpoint('/messages'), { method: 'POST', headers: { ...this.headers(), 'content-type': 'application/json', Accept: 'text/event-stream' }, signal: activeController.signal, body: JSON.stringify(body) });
       } catch (error) {
         if (signal?.aborted) { throw new Error('Stopped.'); }
-        // Headers didn't arrive in time: this channel is stuck. Re-roll onto a fresh one (the gateway picks
-        // a new channel each try) on its own budget — exactly what a manual retry did. Don't fail, don't
-        // spend the network-error budget. Once the budget is gone, shouldCapFirstByte() stops capping and
-        // the next attempt just waits the connection out under the idle watchdog instead.
+        // Headers didn't arrive before the cap: this channel is stuck (it would hang to the proxy's ~120s
+        // timeout and 500/524). Re-roll onto a fresh one — exactly what a manual retry did, but automatic.
+        // Don't spend the network-error budget on it. Bounded by MAX_TTFB_REROLLS: after that many stuck
+        // channels in a row the upstream is genuinely out, so fail cleanly instead of hanging forever.
         if (ttfbFired) {
           ttfbRerolls += 1;
+          if (ttfbRerolls > MAX_TTFB_REROLLS) {
+            throw new TechwordApiError('The Techword servers are busy right now — every channel timed out. Please try again in a moment.', false);
+          }
           yield { status: `Finding a faster server — retrying (attempt ${this.bumpAttempt()})…` };
           attempt -= 1;
           await this.sleep(300, signal);

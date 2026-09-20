@@ -844,9 +844,6 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   <button id="transcriptBtn" class="workbar-toggle" title="Show what Techword is thinking">Brain ⋯</button>
 </div>
 <section id="transcript" class="transcript hidden" aria-label="Brain — the model's reasoning">
-  <div class="transcript-head">
-    <button id="transcriptClose" class="transcript-close" title="Hide">✕</button>
-  </div>
   <div id="transcriptList" class="transcript-list"></div>
 </section>
 

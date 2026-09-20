@@ -47,7 +47,6 @@
     workbarText: document.getElementById('workbarText'),
     transcriptBtn: document.getElementById('transcriptBtn'),
     transcript: document.getElementById('transcript'),
-    transcriptClose: document.getElementById('transcriptClose'),
     transcriptList: document.getElementById('transcriptList'),
     queued: document.getElementById('queued'),
   };
@@ -558,6 +557,35 @@
     retry.textContent = '↻ Retry';
     retry.addEventListener('click', () => { retry.disabled = true; setBusy(true); showStatus('Retrying…'); vscode.postMessage({ kind: 'retry' }); });
     d.append(msg, retry);
+    add(d);
+  }
+
+  // A stopped turn needs to be actionable, not a dead end: Retry resumes the interrupted task from the
+  // last user turn, Copy grabs whatever partial answer had streamed before the stop. Capture the partial
+  // text BEFORE endAssistant() clears currentRaw. Copy only appears when there's something to copy.
+  function addStopped(partial) {
+    endAssistant();
+    clearStatus();
+    const d = document.createElement('div');
+    d.className = 'note-line stopped-line';
+    const label = document.createElement('span');
+    label.className = 'stopped-label';
+    label.textContent = '■ Stopped';
+    const actions = document.createElement('span');
+    actions.className = 'stopped-actions';
+    const retry = document.createElement('button');
+    retry.className = 'retry-btn';
+    retry.textContent = '↻ Retry';
+    retry.addEventListener('click', () => { retry.disabled = true; setBusy(true); showStatus('Retrying…'); vscode.postMessage({ kind: 'retry' }); });
+    actions.append(retry);
+    if (partial && partial.trim()) {
+      const copy = document.createElement('button');
+      copy.className = 'retry-btn';
+      copy.textContent = '⧉ Copy';
+      copy.addEventListener('click', () => { vscode.postMessage({ kind: 'copy', text: partial }); copy.textContent = '✓ Copied'; setTimeout(() => { copy.textContent = '⧉ Copy'; }, 1200); });
+      actions.append(copy);
+    }
+    d.append(label, actions);
     add(d);
   }
 
@@ -1098,10 +1126,10 @@
   });
   el.stop.addEventListener('click', () => {
     vscode.postMessage({ kind: 'stop' });
-    endAssistant();
+    const partial = currentRaw; // grab the streamed-so-far answer before addStopped()→endAssistant() clears it
     clearStatus();
     setBusy(false);
-    addNote('■ Stopped');
+    addStopped(partial);
     logActivity('Stopped.', 'tr-error');
     armActivityClear();
   });
@@ -1134,7 +1162,6 @@
     if (show && el.transcriptList) { el.transcriptList.scrollTop = el.transcriptList.scrollHeight; }
   }
   if (el.transcriptBtn) { el.transcriptBtn.addEventListener('click', () => toggleTranscript()); }
-  if (el.transcriptClose) { el.transcriptClose.addEventListener('click', () => toggleTranscript(false)); }
   function toggleModeMenu(open) {
     const show = open === undefined ? el.modeMenu.classList.contains('hidden') : open;
     el.modeMenu.classList.toggle('hidden', !show);

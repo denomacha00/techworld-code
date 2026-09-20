@@ -41,40 +41,42 @@ test('an over-large thinking budget is capped below max_tokens', () => {
   assert.deepEqual(p.thinking, { type: 'enabled', budget_tokens: 4096 - 256 });
 });
 
-// The TTFB (time-to-first-byte) cap re-rolls a stuck channel — but only when we can tell fast from slow.
-// With thinking OFF a fast channel answers in a few seconds, so a 25s silence means a bad channel worth
-// dropping. With thinking ON a long first-byte wait is the model reasoning, not a stuck channel, so we
-// must never cut it. And after a few re-rolls the upstream is slow everywhere — stop capping and wait it out.
+// The TTFB (time-to-first-byte) cap re-rolls a stuck channel. Measured, this gateway's channels are BIMODAL:
+// a healthy one delivers in ~4-35s, a dead one never delivers — it hangs to the proxy's ~120s timeout, then
+// 500/524. So with thinking OFF we ALWAYS cap: a dead channel does not recover by waiting, so every attempt
+// gets a deadline and re-rolls onto a fresh channel. What's bounded is the NUMBER of re-rolls (in the loop),
+// not the cap — turning the cap off is exactly what let a dead channel hang 120s and storm retries. With
+// thinking ON a long first-byte wait is the model reasoning, not a stuck channel, so we never cut it.
 
-test('first-byte cap is ON when thinking is off and we still have re-roll budget', () => {
-  assert.equal(shouldCapFirstByte(false, 0), true);
-  assert.equal(shouldCapFirstByte(false, 2), true, 'still under the budget of 3');
-});
-
-test('first-byte cap is OFF once the re-roll budget is spent — the upstream is just slow everywhere', () => {
-  assert.equal(shouldCapFirstByte(false, 3), false, 'budget reached → stop capping, wait it out');
-  assert.equal(shouldCapFirstByte(false, 10), false);
+test('first-byte cap is ALWAYS on when thinking is off — a stuck channel never recovers by waiting', () => {
+  assert.equal(shouldCapFirstByte(false), true);
 });
 
 test('first-byte cap is NEVER applied when thinking is on — a long wait is the model reasoning, not a stuck channel', () => {
-  assert.equal(shouldCapFirstByte(true, 0), false);
-  assert.equal(shouldCapFirstByte(true, 2), false);
+  assert.equal(shouldCapFirstByte(true), false);
 });
 
 // The first-byte cap is PROGRESSIVE: the first probe is the likely cold prefill (first request of a run, or
 // the first after the 5-min prompt-cache TTL lapses) and must get room, or we abort a request that would
-// have delivered and re-roll into another cold prefill — the retry storm. Re-rolls after it hunt fast.
+// have delivered and re-roll into another cold prefill — the retry storm. Re-rolls after it hunt a healthy
+// channel; 20s catches the fast ones fast while still giving a cold re-roll room to prefill.
 test('first probe gets a generous cap (cold prefill / expired cache), re-rolls hunt fast', () => {
-  assert.equal(firstByteCapMs(0), 18000, 'first probe: room for a real cold prefill, not a snap re-roll');
-  assert.equal(firstByteCapMs(1), 10000, 're-roll: a good channel starts in ~4-6s, so hunt one quickly');
-  assert.equal(firstByteCapMs(2), 10000);
+  assert.equal(firstByteCapMs(0), 45000, 'first probe: room for a real cold prefill on a full context, not a snap re-roll');
+  assert.equal(firstByteCapMs(1), 20000, 're-roll: hunt a healthy channel, but leave room for a cold prefill');
+  assert.equal(firstByteCapMs(2), 20000);
 });
 
-test('total capped wait before giving up on re-rolls stays well under the proxy 524 (~100s)', () => {
-  // Worst case = first probe + every re-roll in the budget, all capped. Must leave headroom so the LAST
-  // (uncapped) attempt can still wait out a genuinely slow-everywhere upstream before the proxy times out.
-  let total = 0;
-  for (let r = 0; r < 3; r += 1) { total += firstByteCapMs(r); }
-  assert.equal(total, 38000, '18 + 10 + 10');
-  assert.ok(total < 90000, 'comfortably under the ~100s proxy origin timeout');
+test('the first probe is MORE generous than every re-roll — a cold start must not be cut short and re-rolled', () => {
+  // The retry storm the user hit came from a first probe SHORTER than the real cold-prefill time: it aborted
+  // a request that would have delivered, then re-rolled into another cold channel. The first wait must always
+  // exceed a re-roll wait so a legitimate cold start finishes on the first channel with no retry message.
+  assert.ok(firstByteCapMs(0) > firstByteCapMs(1), 'first probe must out-wait a re-roll');
+});
+
+test('every attempt is capped in a bounded chunk — no single attempt can hang out to the ~120s proxy timeout', () => {
+  // The bug: after the old budget was "spent" we stopped capping, so an attempt could hang uncapped to the
+  // proxy's 120s timeout, 500, back off, and hang again. Now EVERY attempt is capped, so no single wait ever
+  // approaches 120s — the worst case is a sum of small capped chunks that each escape a dead channel.
+  for (let r = 0; r <= 6; r += 1) { assert.ok(firstByteCapMs(r) <= 45000, 'no attempt waits more than the first probe'); }
+  assert.ok(firstByteCapMs(1) < 120000, 'a re-roll never approaches the proxy origin timeout');
 });
