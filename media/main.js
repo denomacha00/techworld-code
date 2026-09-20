@@ -282,6 +282,13 @@
   function logActivity(text, cls) {
     if (!el.transcriptList) { return; }
     if (!text) { return; }
+    // The Brain panel shows ONLY the model's real reasoning — what it's thinking, what it plans, how it
+    // reads the problem — and nothing else. Tool calls (Read · file), results (↳ Read 24 lines), and
+    // status/retry lines (Finding a faster server…) are deliberately dropped here: they're already shown
+    // in chat (tool cards) and on the working bar, and mixing them in buried the one line that mattered.
+    // So only reasoning rows (tagged 'tr-think' by emitThink) render; every other caller is a no-op for
+    // the panel. When there's no reasoning, the panel stays empty — exactly as intended.
+    if (cls !== 'tr-think') { return; }
     cancelActivityClear(); // fresh activity → the task is alive again, keep the trail
     const row = document.createElement('div');
     row.className = 'transcript-row' + (cls ? ' ' + cls : '');
@@ -1119,7 +1126,7 @@
     const show = open === undefined ? el.transcript.classList.contains('hidden') : open;
     if (show) { cancelActivityClear(); } // opened to read it → don't tidy it away underneath them
     el.transcript.classList.toggle('hidden', !show);
-    if (el.transcriptBtn) { el.transcriptBtn.textContent = show ? 'Activity ▴' : 'Activity ▾'; }
+    if (el.transcriptBtn) { el.transcriptBtn.textContent = 'Brain ⋯'; }
     // Hide the blue working-bar while the Activity drawer is open so you never see two stacked
     // "Activity" surfaces — the drawer you opened is the only one on screen. Restored on close
     // (only if it's still meant to be showing — workState tracks whether Techword is busy).

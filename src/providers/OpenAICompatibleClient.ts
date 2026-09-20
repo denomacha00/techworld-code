@@ -13,10 +13,9 @@ const MAX_RETRIES = 6;
 const CHANNEL_RETRIES = 10;
 const STREAM_IDLE_MS = 60000; // if no stream data arrives for this long, surface an error instead of hanging
 // Time-to-first-byte watchdog. This upstream withholds response headers until the model starts generating,
-// and channels vary wildly (measured ~4s on a fast channel vs ~37s+ on a stuck one for identical requests).
-// A stuck channel would block in fetch() until the proxy's ~100s origin timeout → 524. So on the fast path
-// we cap the headers wait and re-roll onto a fresh channel — the same thing a manual retry did.
-const TTFB_TIMEOUT_MS = 25000; // headers not here in 25s = a stuck channel (fast channels deliver in <6s)
+// and channels vary wildly (measured ~4s on a fast channel vs a stuck one that never delivers before the
+// proxy's ~100s origin timeout → 524). So on the fast path we cap the headers wait and re-roll onto a fresh
+// channel — the same thing a manual retry did, but automatic.
 const TTFB_REROLL_BUDGET = 3;  // after this many re-rolls the upstream is slow everywhere — stop capping, wait it out
 const DEFAULT_THINKING_BUDGET = 2048; // modest reasoning budget: real thinking in Activity without ballooning cost
 const MIN_THINKING_BUDGET = 1024;     // Anthropic's floor for budget_tokens
@@ -114,6 +113,19 @@ export function thinkingParams(input: {
  *  re-roll budget (past it, the upstream is slow everywhere — stop cutting good connections, wait it out). */
 export function shouldCapFirstByte(thinkingEnabled: boolean, ttfbRerolls: number): boolean {
   return !thinkingEnabled && ttfbRerolls < TTFB_REROLL_BUDGET;
+}
+
+/** How long to wait for the first byte before re-rolling, in ms — PROGRESSIVE, not flat. The first probe
+ *  (ttfbRerolls === 0) is the most likely to be a real cold prefill: the very first request of a run, or
+ *  the first after the 5-minute prompt-cache TTL lapses, must reprocess the whole system+tools+history
+ *  from scratch, which legitimately takes longer than a warm turn. Cutting that at a short cap would abort
+ *  a request that WOULD have delivered and re-roll into yet another cold prefill — the retry storm the user
+ *  saw. So the first probe gets 18s; every re-roll after it gets 10s, because by then we KNOW this prompt
+ *  can start fast on a good channel (a fast channel answers in ~4-6s), so a shorter cap hunts one quickly
+ *  instead of sinking another 18s into each gamble. Worst case before we stop capping and wait it out:
+ *  18 + 10 + 10 = 38s, comfortably under the proxy's ~100s 524. */
+export function firstByteCapMs(ttfbRerolls: number): number {
+  return ttfbRerolls === 0 ? 18000 : 10000;
 }
 
 /** An API error tagged with whether it's worth retrying. `terminal` errors (dead key, no tokens,
@@ -254,7 +266,7 @@ export class OpenAICompatibleClient {
       const capFirstByte = shouldCapFirstByte(thinkOn, ttfbRerolls);
       let ttfbFired = false;
       let ttfbTimer: ReturnType<typeof setTimeout> | undefined;
-      if (capFirstByte) { const c = activeController; ttfbTimer = setTimeout(() => { ttfbFired = true; c.abort(); }, TTFB_TIMEOUT_MS); }
+      if (capFirstByte) { const c = activeController; ttfbTimer = setTimeout(() => { ttfbFired = true; c.abort(); }, firstByteCapMs(ttfbRerolls)); }
       try {
         // Accept: text/event-stream tells the gateway (and every proxy hop) this is an SSE request, so
         // it flushes each event as it arrives instead of buffering the whole reply — the same header the

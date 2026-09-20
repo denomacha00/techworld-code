@@ -1,6 +1,6 @@
 {
-  "version": "1.9.2",
-  "vsixUrl": "/releases/techword-code-1.9.2.vsix",
-  "notes": "Hotfix: a variable-name collision in the webview script broke the whole panel in 1.9.1 (blank/dead view). Fixed, and added a webview syntax check (node --check media/main.js) to the build, test, and release gates so a broken panel can never ship again.",
-  "sha256": "4b969d3e8ab883be397d8a454cd1e2e52a08d6a5bb5b41d7e0841df88b2c2af5"
+  "version": "1.9.3",
+  "vsixUrl": "/releases/techword-code-1.9.3.vsix",
+  "notes": "Faster first response and a cleaner Brain panel. (1) Speed: the time-to-first-byte watchdog is now progressive — the first request of a run (and the first after the prompt cache expires) gets room for a real cold start instead of being cut at a flat 25s and re-rolled into another cold start, which was the 'Finding a faster server' retry storm. Re-rolls after it hunt a fast channel quickly (~10s). (2) The Activity panel is now 'Brain' and shows ONLY the model's real reasoning — tool lines, result lines, and status/retry noise no longer bury the one line that matters; empty when there's no reasoning.",
+  "sha256": "1f2be894f3e06d24afd1263954a2a65841b5c7798c8f228c92bcc61d1a5377e5"
 }

@@ -841,11 +841,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 <div id="workbar" class="workbar hidden" aria-live="polite">
   <span class="workbar-spin"></span>
   <span id="workbarText" class="workbar-text">Working…</span>
-  <button id="transcriptBtn" class="workbar-toggle" title="Show what Techword is doing">Activity ▾</button>
+  <button id="transcriptBtn" class="workbar-toggle" title="Show what Techword is thinking">Brain ⋯</button>
 </div>
-<section id="transcript" class="transcript hidden" aria-label="Activity transcript">
+<section id="transcript" class="transcript hidden" aria-label="Brain — the model's reasoning">
   <div class="transcript-head">
-    <button id="transcriptClose" class="transcript-close" title="Hide activity">✕</button>
+    <button id="transcriptClose" class="transcript-close" title="Hide">✕</button>
   </div>
   <div id="transcriptList" class="transcript-list"></div>
 </section>

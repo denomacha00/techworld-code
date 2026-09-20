@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { thinkingParams, shouldCapFirstByte } from '../src/providers/OpenAICompatibleClient';
+import { thinkingParams, shouldCapFirstByte, firstByteCapMs } from '../src/providers/OpenAICompatibleClient';
 
 // THE speed fix. Measured against the real upstream: a turn is ≈10× faster to first byte (~4s vs ~40s)
 // when the request EXPLICITLY sends thinking:{type:'disabled'} instead of omitting the param. Omitting it
@@ -59,4 +59,22 @@ test('first-byte cap is OFF once the re-roll budget is spent — the upstream is
 test('first-byte cap is NEVER applied when thinking is on — a long wait is the model reasoning, not a stuck channel', () => {
   assert.equal(shouldCapFirstByte(true, 0), false);
   assert.equal(shouldCapFirstByte(true, 2), false);
+});
+
+// The first-byte cap is PROGRESSIVE: the first probe is the likely cold prefill (first request of a run, or
+// the first after the 5-min prompt-cache TTL lapses) and must get room, or we abort a request that would
+// have delivered and re-roll into another cold prefill — the retry storm. Re-rolls after it hunt fast.
+test('first probe gets a generous cap (cold prefill / expired cache), re-rolls hunt fast', () => {
+  assert.equal(firstByteCapMs(0), 18000, 'first probe: room for a real cold prefill, not a snap re-roll');
+  assert.equal(firstByteCapMs(1), 10000, 're-roll: a good channel starts in ~4-6s, so hunt one quickly');
+  assert.equal(firstByteCapMs(2), 10000);
+});
+
+test('total capped wait before giving up on re-rolls stays well under the proxy 524 (~100s)', () => {
+  // Worst case = first probe + every re-roll in the budget, all capped. Must leave headroom so the LAST
+  // (uncapped) attempt can still wait out a genuinely slow-everywhere upstream before the proxy times out.
+  let total = 0;
+  for (let r = 0; r < 3; r += 1) { total += firstByteCapMs(r); }
+  assert.equal(total, 38000, '18 + 10 + 10');
+  assert.ok(total < 90000, 'comfortably under the ~100s proxy origin timeout');
 });
