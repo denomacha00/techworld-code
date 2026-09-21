@@ -1,6 +1,6 @@
 {
-  "version": "1.9.7",
-  "vsixUrl": "/releases/techword-code-1.9.7.vsix",
-  "notes": "1.9.7 — Settings/Brain panels no longer collapse to a sliver while a task runs; History shows a loading bar on open; professional SVG icons for terminal/diff/preview/attach.",
-  "sha256": "ddb8ccdec8d1d43da5e7d62053da0e7315807180f57d529506447a41961397fe"
+  "version": "1.9.8",
+  "vsixUrl": "/releases/techword-code-1.9.8.vsix",
+  "notes": "1.9.8 — icon buttons styled by explicit class (no reliance on :has() engine support); same panel/History/icon fixes as 1.9.7, hardened.",
+  "sha256": "cc062862add168a519f0772b6cafd030d72fd123cf8de83092471e8b4aa8e409"
 }

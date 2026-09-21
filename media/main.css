@@ -100,15 +100,16 @@ button.icon {
 }
 button.icon:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.15)); }
 /* Icon buttons that carry an inline SVG (terminal, diff, preview, attach): center the glyph and let it
-   inherit the button's text colour so it matches the theme and the text buttons beside it. */
-button.icon svg { display: block; }
-button.icon:has(svg) {
+   inherit the button's text colour so it matches the theme and the text buttons beside it. Explicit
+   .icon-svg class (not :has()) so it never depends on the browser engine's selector support. */
+button.icon-svg {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 5px 8px;
   line-height: 0;
 }
+button.icon-svg svg { display: block; }
 button:disabled { opacity: 0.5; cursor: default; }
 #modeBtn.mode-plan { color: #fff; background: #9e6a03; border-color: #9e6a03; }
 
