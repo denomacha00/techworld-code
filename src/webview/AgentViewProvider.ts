@@ -876,10 +876,31 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         </button>
       </div>
     </div>
-    <button id="terminalBtn" class="icon" title="Open a terminal" aria-label="Open a terminal">▣</button>
-    <button id="changesBtn" class="icon" title="View changes (diff)" aria-label="View changes (diff)">⌥</button>
-    <button id="previewBtn" class="icon" title="Preview the current file" aria-label="Preview the current file">◱</button>
-    <button id="attachBtn" class="icon" title="Attach files or images" aria-label="Attach files or images">📎</button>
+    <button id="terminalBtn" class="icon" title="Open a terminal" aria-label="Open a terminal">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.6"></rect>
+        <path d="M4.3 6.1 6.4 8l-2.1 1.9"></path>
+        <path d="M8.4 10.1h3.3"></path>
+      </svg>
+    </button>
+    <button id="changesBtn" class="icon" title="View changes (diff)" aria-label="View changes (diff)">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M8 2.6v4.1"></path>
+        <path d="M5.95 4.65h4.1"></path>
+        <path d="M5.95 11.4h4.1"></path>
+      </svg>
+    </button>
+    <button id="previewBtn" class="icon" title="Preview the current file" aria-label="Preview the current file">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M1.5 8s2.4-4.4 6.5-4.4S14.5 8 14.5 8s-2.4 4.4-6.5 4.4S1.5 8 1.5 8Z"></path>
+        <circle cx="8" cy="8" r="1.9"></circle>
+      </svg>
+    </button>
+    <button id="attachBtn" class="icon" title="Attach files or images" aria-label="Attach files or images">
+      <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12.7 7.3 7.5 12.5a2.6 2.6 0 0 1-3.7-3.7l5.6-5.6a1.75 1.75 0 0 1 2.5 2.5L6.1 11.5"></path>
+      </svg>
+    </button>
     <button id="sendBtn" aria-label="Send message">Send</button>
     <button id="stopBtn" class="secondary hidden" aria-label="Stop the agent">Stop</button>
     <span id="usage" class="usage"></span>

@@ -99,6 +99,16 @@ button.icon {
   border-color: var(--border);
 }
 button.icon:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.15)); }
+/* Icon buttons that carry an inline SVG (terminal, diff, preview, attach): center the glyph and let it
+   inherit the button's text colour so it matches the theme and the text buttons beside it. */
+button.icon svg { display: block; }
+button.icon:has(svg) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 8px;
+  line-height: 0;
+}
 button:disabled { opacity: 0.5; cursor: default; }
 #modeBtn.mode-plan { color: #fff; background: #9e6a03; border-color: #9e6a03; }
 
@@ -121,11 +131,12 @@ select { max-width: 180px; }
   border-bottom: 1px solid var(--border);
   padding: 12px;
   background: var(--card-bg);
-  flex: 0 1 auto;
-  /* Cap the panel to the viewport and let it scroll. Without this, a tall panel (Settings holds the
-     key field, model, Test connection, auto-approve, capabilities AND MCP) runs past the bottom of the
-     view with no scrollbar, so everything below the fold is unreachable. */
-  max-height: calc(100vh - 52px);
+  /* flex-shrink 0: an open panel (Settings/History) must NEVER be squeezed to a thin sliver when a task
+     is running and the log + workbar + Brain drawer are all fighting for height. The panel keeps its own
+     height and the LOG yields instead. Capped (min of 68vh and "viewport minus room for topbar+composer")
+     so the composer + Send button always stay on screen; the panel scrolls internally past that. */
+  flex: 0 0 auto;
+  max-height: min(68vh, calc(100vh - 240px));
   overflow-y: auto;
 }
 .panel h2 { margin: 0 0 10px; font-size: 13px; }
@@ -187,6 +198,9 @@ select { max-width: 180px; }
 /* ---------- Message log ---------- */
 #log {
   flex: 1 1 auto;
+  /* min-height 0 lets the log shrink below its content height so the panels/Brain drawer above and the
+     composer below keep their room — it's the region that gives, scrolling its overflow. */
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
   display: flex;
@@ -473,6 +487,11 @@ select { max-width: 180px; }
      below the log and never looks "covered" by the workbar or composer behind it. */
   background: var(--vscode-editorWidget-background, var(--vscode-sideBar-background, #1e1e1e));
   box-shadow: 0 -4px 16px rgba(0,0,0,0.35);
+  /* flex-shrink 0 + a floor: the Brain drawer opens during a task, exactly when the full log and the
+     workbar are fighting for height — without this it collapses to a thin unreadable strip. It holds a
+     real height (35-45vh) and the LOG yields; the reasoning list scrolls inside it. */
+  flex: 0 0 auto;
+  min-height: min(35vh, 240px);
   max-height: 45vh;
   position: relative;
   z-index: 5;
@@ -916,6 +935,32 @@ pre code .tk-n { color: #b5cea8; }
   padding: 0 8px;
 }
 .hist-del:hover { color: var(--vscode-errorForeground); background: transparent; }
+
+/* Loading indicator shown the instant History opens, while the host fetches saved chats — a line
+   sweeping end-to-end, so the panel never looks empty/broken during the round-trip. renderHistory()
+   replaces it the moment items arrive. */
+.hist-loading {
+  position: relative;
+  height: 2px;
+  margin: 6px 2px;
+  border-radius: 2px;
+  background: var(--vscode-editorWidget-border, rgba(128,128,128,0.25));
+  overflow: hidden;
+}
+.hist-loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 40%;
+  border-radius: 2px;
+  background: var(--vscode-charts-blue, #4daafc);
+  animation: hist-sweep 1.05s ease-in-out infinite;
+}
+@keyframes hist-sweep {
+  0%   { left: -40%; }
+  100% { left: 100%; }
+}
 
 /* ---------- Onboarding ---------- */
 .onboard {

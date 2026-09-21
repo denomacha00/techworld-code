@@ -946,6 +946,24 @@
   }
 
   // ---------- history ----------
+  // Opening History posts a message and waits for the host to reply with the saved chats. Show an
+  // indeterminate loading bar (a line sweeping end-to-end) the instant the panel opens, so it never
+  // looks empty/broken during that round-trip. renderHistory() replaces it the moment items arrive.
+  function showHistoryLoading() {
+    el.historyList.innerHTML = '';
+    const load = document.createElement('div');
+    load.className = 'hist-loading';
+    load.setAttribute('role', 'progressbar');
+    load.setAttribute('aria-label', 'Loading chat history');
+    const bar = document.createElement('div');
+    bar.className = 'hist-loading-bar';
+    load.append(bar);
+    el.historyList.append(load);
+  }
+  function requestHistory() {
+    showHistoryLoading();
+    vscode.postMessage({ kind: 'history' });
+  }
   function renderHistory(items, currentId) {
     el.historyList.innerHTML = '';
     if (!items || items.length === 0) {
@@ -1222,7 +1240,7 @@
   el.attachBtn.addEventListener('click', () => vscode.postMessage({ kind: 'attach' }));
   el.historyBtn.addEventListener('click', () => {
     const showing = el.historyPanel.classList.toggle('hidden');
-    if (!showing) { vscode.postMessage({ kind: 'history' }); el.settings.classList.add('hidden'); }
+    if (!showing) { requestHistory(); el.settings.classList.add('hidden'); }
   });
   el.settingsBtn.addEventListener('click', () => { el.settings.classList.toggle('hidden'); el.historyPanel.classList.add('hidden'); });
 
@@ -1243,7 +1261,7 @@
       else if (act === 'files') { vscode.postMessage({ kind: 'conversationFiles' }); }
       else if (act === 'memory') { vscode.postMessage({ kind: 'memory' }); }
       else if (act === 'outputStyle') { vscode.postMessage({ kind: 'chooseOutputStyle' }); }
-      else if (act === 'history') { el.historyPanel.classList.remove('hidden'); el.settings.classList.add('hidden'); vscode.postMessage({ kind: 'history' }); }
+      else if (act === 'history') { el.historyPanel.classList.remove('hidden'); el.settings.classList.add('hidden'); requestHistory(); }
       else if (act === 'settings') { el.settings.classList.toggle('hidden'); el.historyPanel.classList.add('hidden'); }
     });
   });
