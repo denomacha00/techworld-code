@@ -5,9 +5,24 @@ import * as vscode from 'vscode';
 import { type Checkpoint, type CommandProposal, type EditPreview, type FileEdit } from '../types';
 import { contentHash, isSensitivePath, redact } from '../security/Redaction';
 import { CODE_MAP_EXTENSIONS, rankFiles, type MapInput } from './CodeMap';
+import { appendCapped, formatBackgroundReport, unknownTokenMessage } from './backgroundCommand';
 
 const execFileAsync = promisify(execFile);
 const PREVIEW_CHAR_LIMIT = 60000;
+
+/** A command running in the background (survives across agent turns). Tracked in WorkspaceToolExecutor so
+ *  the agent can start a long job, keep working, and poll it later — the thing a 600s foreground cap made
+ *  impossible. */
+interface BackgroundProcess {
+  token: string;
+  command: string;
+  child: ReturnType<typeof spawn>;
+  output: string;
+  exitCode: number | undefined;
+  running: boolean;
+  startedAt: number;
+  endedAt: number | undefined;
+}
 
 const SYMBOL_KINDS = ['File', 'Module', 'Namespace', 'Package', 'Class', 'Method', 'Property', 'Field', 'Constructor', 'Enum', 'Interface', 'Function', 'Variable', 'Constant', 'String', 'Number', 'Boolean', 'Array', 'Object', 'Key', 'Null', 'EnumMember', 'Struct', 'Event', 'Operator', 'TypeParameter'];
 function symbolKind(kind: vscode.SymbolKind): string { return SYMBOL_KINDS[kind] ?? 'Symbol'; }
@@ -431,10 +446,11 @@ export class WorkspaceToolExecutor {
    * fast with a clear message instead of waiting on a prompt that can never be answered here), the timeout
    * kills the WHOLE process tree (taskkill /T on Windows), and Stop does the same.
    */
-  async runCommand(proposal: CommandProposal, signal?: AbortSignal, onChunk?: (chunk: string) => void): Promise<string> {
+  /** Shared spawn setup for foreground AND background commands: resolves cwd, picks the shell, forces the
+   *  command non-interactive, and strips our provider keys. One place so both paths behave identically. */
+  private spawnShell(proposal: CommandProposal): ReturnType<typeof spawn> {
     const root = this.root();
     const cwd = proposal.cwd ? this.uri(proposal.cwd).fsPath : root.uri.fsPath;
-    const timeout = Math.min(Math.max(proposal.timeoutMs ?? 120000, 1000), 600000);
     const isWin = process.platform === 'win32';
     const shell = isWin ? 'cmd.exe' : '/bin/sh';
     const args = isWin ? ['/d', '/s', '/c', proposal.command] : ['-lc', proposal.command];
@@ -442,16 +458,42 @@ export class WorkspaceToolExecutor {
     // no output. GIT_TERMINAL_PROMPT=0 makes git error out; GIT_ASKPASS/SSH pointed at a no-op refuses
     // GUI/askpass popups too. Also strip our own provider keys so a spawned tool can't read them.
     const env: NodeJS.ProcessEnv = { ...process.env, ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo', GCM_INTERACTIVE: 'Never', GIT_PAGER: 'cat', PAGER: 'cat' };
+    // detached on POSIX makes the child its own process-group leader, so process.kill(-pid) can take down
+    // the whole tree (git + credential helper, npm + sub-processes) instead of just the shell.
+    return spawn(shell, args, { cwd, windowsHide: true, env, detached: !isWin });
+  }
+
+  /** Kill a whole process tree — a bare child.kill() leaves grandchildren (git's credential helper, an
+   *  npm sub-process) alive holding the pipe open, which is exactly what made commands hang. */
+  private static killTree(child: ReturnType<typeof spawn>): void {
+    const isWin = process.platform === 'win32';
+    if (child.pid === undefined) { child.kill('SIGKILL'); return; }
+    if (isWin) { try { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); } catch { child.kill('SIGKILL'); } }
+    else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
+  }
+
+  async runCommand(proposal: CommandProposal, signal?: AbortSignal, onChunk?: (chunk: string) => void): Promise<string> {
+    // No wall-clock cap. A long build that keeps printing (PyInstaller, webpack, a test suite) is HEALTHY
+    // and must be allowed to finish — a fixed deadline was exactly what killed those mid-run. Instead we use
+    // an INACTIVITY watchdog: the command may run as long as it likes as long as it's still producing output;
+    // only true silence for `idleMs` means it's genuinely stuck (e.g. blocked on a stdin prompt that can never
+    // be answered here). Any output resets the clock. `timeoutMs` (if given) is treated as this idle window.
+    const idleMs = Math.max(proposal.timeoutMs ?? 180000, 1000);
 
     return await new Promise<string>((resolve) => {
       let out = '';
       let over = false; // stop appending once we've hit the output cap (still drain the process)
       let settled = false;
-      // detached on POSIX makes the child its own process-group leader, so process.kill(-pid) can take
-      // down the whole tree (git + credential helper, npm + sub-processes) instead of just the shell.
-      const child = spawn(shell, args, { cwd, windowsHide: true, env, detached: !isWin });
+      let idleTimer: ReturnType<typeof setTimeout>;
+      const child = this.spawnShell(proposal);
+
+      const armIdle = (): void => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => { killTree(); finish(`\n\nCommand produced no output for ${Math.round(idleMs / 1000)}s and was stopped — it looked stuck. If it was waiting for input (a password, a credential prompt, a confirmation), it can't be answered here — re-run it non-interactively (e.g. a token in the URL, --yes, --no-input). If it was just slow, raise timeoutMs, or run it with run_background_command so it keeps running and you can check on it.`); }, idleMs);
+      };
 
       const append = (data: Buffer): void => {
+        armIdle(); // still alive — reset the inactivity clock
         if (over) { return; }
         const piece = redact(data.toString());
         if (out.length + piece.length > this.outputLimit) {
@@ -465,31 +507,78 @@ export class WorkspaceToolExecutor {
       child.stdout?.on('data', append);
       child.stderr?.on('data', append);
 
-      // Kill the WHOLE tree — a bare child.kill() leaves grandchildren (git's credential helper, an npm
-      // sub-process) alive holding the pipe open, which is exactly what made commands hang.
-      const killTree = (): void => {
-        if (child.pid === undefined) { child.kill('SIGKILL'); return; }
-        if (isWin) { try { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }); } catch { child.kill('SIGKILL'); } }
-        else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
-      };
+      const killTree = (): void => WorkspaceToolExecutor.killTree(child);
 
       const finish = (suffix: string): void => {
         if (settled) { return; }
         settled = true;
-        clearTimeout(timer);
+        clearTimeout(idleTimer);
         signal?.removeEventListener('abort', onAbort);
         const body = out.trim() ? out : '(no output)';
         resolve(redact(`${body}${suffix}`).slice(0, this.outputLimit));
       };
 
-      const timer = setTimeout(() => { killTree(); finish(`\n\nCommand timed out after ${Math.round(timeout / 1000)}s and was stopped. If it was waiting for input (a password, a credential prompt, a confirmation), it can't be answered here — re-run it non-interactively (e.g. a token in the URL, --yes, --no-input).`); }, timeout);
       const onAbort = (): void => { killTree(); finish('\n\nCommand stopped by user.'); };
       if (signal?.aborted) { killTree(); finish('\n\nCommand stopped by user.'); return; }
       signal?.addEventListener('abort', onAbort, { once: true });
+      armIdle(); // start the watchdog now, so a command that emits nothing at all still can't hang forever
 
       child.on('error', (error) => finish(`\n\nCommand failed to start: ${error instanceof Error ? error.message : String(error)}`));
       child.on('close', (code) => finish(code && code !== 0 ? `\n\n(exit code ${code})` : ''));
     });
+  }
+
+  // ---------- background commands (survive across turns, so a long build/dev server never gets cut off) ----------
+  //
+  // A foreground runCommand blocks the agent and is capped at 600s, so a 15-minute PyInstaller build or a
+  // dev server can NEVER complete — the turn ends first. These are spawned in the extension-host process
+  // (which long outlives any single turn) and TRACKED here instead of being killed on return, so the agent
+  // can start one, keep working, and poll it on a later turn. Output accumulates into a capped ring buffer.
+  private readonly background = new Map<string, BackgroundProcess>();
+  /** How much output to retain per background process (tail); an old, chatty server can't grow unbounded. */
+  private static readonly BG_BUFFER_CHARS = 200000;
+
+  /** Start a command in the background. Returns a token to poll with checkBackground / stopBackground. */
+  startBackgroundCommand(proposal: CommandProposal): { token: string; pid: number | undefined } {
+    const token = randomUUID().slice(0, 8);
+    const child = this.spawnShell(proposal);
+    const proc: BackgroundProcess = { token, command: proposal.command, child, output: '', exitCode: undefined, running: true, startedAt: Date.now(), endedAt: undefined };
+    const append = (data: Buffer): void => {
+      proc.output = appendCapped(proc.output, redact(data.toString()), WorkspaceToolExecutor.BG_BUFFER_CHARS);
+    };
+    child.stdout?.on('data', append);
+    child.stderr?.on('data', append);
+    child.on('error', (error) => { proc.output += `\n\nCommand failed to start: ${error instanceof Error ? error.message : String(error)}`; proc.running = false; proc.endedAt = Date.now(); });
+    child.on('close', (code) => { proc.exitCode = code ?? undefined; proc.running = false; proc.endedAt = Date.now(); });
+    this.background.set(token, proc);
+    return { token, pid: child.pid };
+  }
+
+  /** Read a background command's status + accumulated output (tail). Unknown token → clear message. */
+  checkBackgroundCommand(token: string): string {
+    const proc = this.background.get(token);
+    if (!proc) { return unknownTokenMessage(token, [...this.background.keys()]); }
+    return redact(formatBackgroundReport(proc, Date.now())).slice(0, this.outputLimit);
+  }
+
+  /** Stop a background command (kills its whole process tree). Idempotent. */
+  stopBackgroundCommand(token: string): string {
+    const proc = this.background.get(token);
+    if (!proc) { return `No background command with token "${token}".`; }
+    if (proc.running) { WorkspaceToolExecutor.killTree(proc.child); proc.running = false; proc.endedAt = Date.now(); return `Stopped background command ${token} (${proc.command}).`; }
+    return `Background command ${token} had already exited (code ${proc.exitCode ?? 'unknown'}).`;
+  }
+
+  /** List every tracked background command (for the model to see what it has running). */
+  listBackgroundCommands(): string {
+    if (this.background.size === 0) { return 'No background commands.'; }
+    return [...this.background.values()].map((p) => `${p.token}: ${p.running ? 'running' : `exited(${p.exitCode ?? '?'})`} — ${p.command}`).join('\n');
+  }
+
+  /** Kill every background process. Call on session/extension shutdown so nothing is orphaned. */
+  disposeBackground(): void {
+    for (const proc of this.background.values()) { if (proc.running) { try { WorkspaceToolExecutor.killTree(proc.child); } catch { /* best effort */ } } }
+    this.background.clear();
   }
 
   private root(): vscode.WorkspaceFolder {

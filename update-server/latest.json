@@ -1,6 +1,6 @@
 {
-  "version": "1.10.1",
-  "vsixUrl": "/releases/techword-code-1.10.1.vsix",
-  "notes": "Queued messages now wait a few seconds before the agent picks them up, so you can edit or cancel them first — and the current step finishes before your message is folded in.",
-  "sha256": "47768378f1333e261a3e0bf0e88704a9f00713cd96833e50cdf0d48e0f8e5682"
+  "version": "1.11.0",
+  "vsixUrl": "/releases/techword-code-1.11.0.vsix",
+  "notes": "No time limit on terminal commands — a long build runs as long as it keeps working. New background commands: start a long build or dev server, keep working, and check on it. Nothing gets cut off anymore.",
+  "sha256": "0ce5c278e57a949294935197dd3bb5a467c664851b5bac7f444763fa3150671b"
 }

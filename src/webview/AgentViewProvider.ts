@@ -87,6 +87,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // Per-workspace so a project you trust stays trusted, and others don't inherit it. Default off.
     this.autoApprove = context.workspaceState.get<{ edits: boolean; commands: boolean }>('techwordCode.autoApprove', { edits: false, commands: false });
     context.subscriptions.push({ dispose: () => this.mcp.dispose() });
+    // Kill any background commands the agent started (dev server, build) so they aren't orphaned on close.
+    context.subscriptions.push({ dispose: () => this.session?.dispose() });
     // Best-effort flush on shutdown: if a turn is mid-flight when VS Code closes, write what we have now.
     // VS Code doesn't await async disposables, so this is a safety net on top of the debounced mid-turn
     // save (scheduleSave) — that keeps worst-case loss to a fraction of a second, this catches the rest.

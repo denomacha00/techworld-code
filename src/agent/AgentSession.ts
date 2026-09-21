@@ -48,7 +48,8 @@ export interface MemorySink {
 }
 
 // remember/forget only touch Techword's own memory file — never user code — so they're allowed in Plan mode too.
-const READONLY_TOOLS = new Set(['list_workspace_files', 'read_file', 'search_workspace', 'get_git_status', 'get_git_diff', 'get_diagnostics', 'find_symbol', 'outline_file', 'find_usages', 'code_map', 'ask_user', 'web_fetch', 'preview_in_chat', 'spawn_explorer', 'remember', 'forget']);
+// check_background_command only READS the status/output of an already-running process, so it's read-only too.
+const READONLY_TOOLS = new Set(['list_workspace_files', 'read_file', 'search_workspace', 'get_git_status', 'get_git_diff', 'get_diagnostics', 'find_symbol', 'outline_file', 'find_usages', 'code_map', 'ask_user', 'web_fetch', 'preview_in_chat', 'spawn_explorer', 'remember', 'forget', 'check_background_command']);
 
 // Pure, side-effect-free lookups that are safe to run CONCURRENTLY when the model batches several in one
 // turn (Claude Code / Cursor do exactly this — the biggest per-turn latency win after caching). Excluded
@@ -407,6 +408,11 @@ export class AgentSession {
   private msUntilQueueReady(): number { return msUntilReady(this.queued, Date.now()); }
 
   stop(): void { this.queued = []; this.emitQueued(); this.answer('[The user stopped the task.]'); this.abortController?.abort(); }
+
+  /** Kill any background commands this session started. Called on shutdown so a dev server / build we
+   *  launched isn't left orphaned when VS Code closes. Deliberately NOT called on user Stop — a background
+   *  process (a dev server) is meant to outlive the task that started it; use stop_background_command for that. */
+  dispose(): void { this.executor.disposeBackground(); }
 
   /** Keep the conversation within the context window. Returns false if the user chose to stop. */
   private async manageContext(client: OpenAICompatibleClient): Promise<boolean> {
@@ -772,7 +778,15 @@ export class AgentSession {
         case 'propose_file_edits':
           return await this.approveEdits(parseEdits(args), stringArg(args, 'summary', 'Proposed file changes'));
         case 'run_terminal_command':
-          return await this.approveCommand({ command: requiredString(args, 'command'), cwd: stringArg(args, 'cwd', ''), purpose: requiredString(args, 'purpose'), timeoutMs: numberArg(args, 'timeoutMs', 120000) });
+          return await this.approveCommand({ command: requiredString(args, 'command'), cwd: stringArg(args, 'cwd', ''), purpose: requiredString(args, 'purpose'), timeoutMs: numberArg(args, 'timeoutMs', 180000) });
+        case 'run_background_command':
+          return await this.approveCommand({ command: requiredString(args, 'command'), cwd: stringArg(args, 'cwd', ''), purpose: requiredString(args, 'purpose') }, true);
+        case 'check_background_command':
+          this.emit({ type: 'tool', name: call.name, detail: stringArg(args, 'token', 'all') });
+          return stringArg(args, 'token', '') ? this.executor.checkBackgroundCommand(stringArg(args, 'token', '')) : this.executor.listBackgroundCommands();
+        case 'stop_background_command':
+          this.emit({ type: 'tool', name: call.name, detail: requiredString(args, 'token') });
+          return this.executor.stopBackgroundCommand(requiredString(args, 'token'));
         default:
           if (this.mcp && call.name.startsWith('mcp__')) { return await this.approveMcp(call.name, args); }
           return `Tool error: ${call.name} is unavailable.`;
@@ -803,13 +817,19 @@ export class AgentSession {
     return result;
   }
 
-  private async approveCommand(proposal: CommandProposal): Promise<string> {
+  private async approveCommand(proposal: CommandProposal, background = false): Promise<string> {
     const approval = this.approvals.request(proposal);
     const id = randomUUID();
-    this.emit({ type: 'tool', name: 'run_terminal_command', detail: proposal.command });
-    const approved = await this.gate({ id, kind: 'command', command: proposal.command, cwd: proposal.cwd || 'workspace root', purpose: proposal.purpose });
+    this.emit({ type: 'tool', name: background ? 'run_background_command' : 'run_terminal_command', detail: proposal.command });
+    const approved = await this.gate({ id, kind: 'command', command: proposal.command, cwd: proposal.cwd || 'workspace root', purpose: background ? `${proposal.purpose} (runs in the background)` : proposal.purpose });
     if (!approved) { this.approvals.reject(approval.id); return 'The user rejected the terminal command.'; }
     if (!this.approvals.consume(approval.id, proposal)) { return 'The user rejected the terminal command.'; }
+    if (background) {
+      // Don't wait: spawn it, return the token, let the model keep working and poll with
+      // check_background_command. The process lives on the executor and survives across turns.
+      const { token, pid } = this.executor.startBackgroundCommand(proposal);
+      return `Started in the background with token "${token}"${pid ? ` (pid ${pid})` : ''}. It keeps running while you work — check on it with check_background_command (token "${token}") and stop it with stop_background_command. Do NOT wait idly; continue with your next step and poll it periodically.`;
+    }
     // Stream the command's output to the chat as it runs (faded, under the card) so you can watch it work
     // — not just a tick at the end. Chunks arrive at the OS pipe's chunk granularity (not per line), so
     // this is coarse enough not to flood the UI; the webview box is capped as a further guard.
