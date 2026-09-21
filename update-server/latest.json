@@ -1,6 +1,6 @@
 {
-  "version": "1.9.9",
-  "vsixUrl": "/releases/techword-code-1.9.9.vsix",
-  "notes": "Techword Code 1.9.9.",
-  "sha256": "225ee7576a79328a79e4e817e9b7291cfd6f82e42f2d9d728f3cd108e3e8960d"
+  "version": "1.10.0",
+  "vsixUrl": "/releases/techword-code-1.10.0.vsix",
+  "notes": "Sharper coding: the agent now adversarially tests its own work, grounds edge cases in the real domain, treats internal contradictions as bugs, and never trusts a passing test it can't explain.",
+  "sha256": "33428c8134fd3c726beaf7db19e63344979d7cf810417ccb1c4eaac70965113e"
 }
