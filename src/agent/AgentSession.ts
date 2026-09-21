@@ -290,6 +290,11 @@ export class AgentSession {
       if (!this.abortController.signal.aborted) { guard.markSpent(); this.emit({ type: 'error', message: error instanceof Error ? error.message : String(error) }); }
     } finally {
       finish(); // covers user Stop, context-decline, and abort-between-tools — all of which return without a terminal event
+      // The task is over. Any message STILL queued here was never folded in: a genuine finish always
+      // drains first (the calls===0 branch loops back to drainQueue while queued.length > 0), so the only
+      // exits that reach this with a non-empty queue are error / maxSteps / context-decline / abort. Clear
+      // it and tell the UI, or a queued chip lingers forever pointing at a task that no longer exists.
+      if (this.queued.length > 0) { this.queued = []; this.emitQueued(); }
       this.abortController = undefined;
     }
   }

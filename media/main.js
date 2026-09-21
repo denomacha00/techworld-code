@@ -1313,8 +1313,8 @@
       case 'question': waitingForAnswer = true; addQuestion(m.text, m.options); break;
       case 'queued': renderQueued(m.items); break;
       case 'preview': addPreview(m.dataUrl, m.name); break;
-      case 'error': waitingForAnswer = false; setBusy(false); addError(m.message); logActivity(m.message, 'tr-error'); armActivityClear(); break;
-      case 'complete': waitingForAnswer = false; endAssistant(); clearStatus(); setBusy(false); logActivity('Done.', 'tr-done'); armActivityClear(); break;
+      case 'error': waitingForAnswer = false; setBusy(false); renderQueued([]); addError(m.message); logActivity(m.message, 'tr-error'); armActivityClear(); break;
+      case 'complete': waitingForAnswer = false; endAssistant(); clearStatus(); setBusy(false); renderQueued([]); logActivity('Done.', 'tr-done'); armActivityClear(); break;
       case 'cmdResult': showCmdResult(m.token, m.output, m.failed); break; // faded terminal output under a Run button
       case 'approvalRequest': addApproval(m.request, m.auto, m.warning); break;
       case 'approvalResolved': resolveApproval(m.id, m.approved); break;

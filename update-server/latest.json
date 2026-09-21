@@ -1,6 +1,6 @@
 {
-  "version": "1.9.8",
-  "vsixUrl": "/releases/techword-code-1.9.8.vsix",
-  "notes": "1.9.8 — icon buttons styled by explicit class (no reliance on :has() engine support); same panel/History/icon fixes as 1.9.7, hardened.",
-  "sha256": "cc062862add168a519f0772b6cafd030d72fd123cf8de83092471e8b4aa8e409"
+  "version": "1.9.9",
+  "vsixUrl": "/releases/techword-code-1.9.9.vsix",
+  "notes": "Techword Code 1.9.9.",
+  "sha256": "225ee7576a79328a79e4e817e9b7291cfd6f82e42f2d9d728f3cd108e3e8960d"
 }
