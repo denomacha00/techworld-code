@@ -12,6 +12,10 @@ export type ApprovalGate = (request: ApprovalRequest) => Promise<boolean>;
 export type ContextMode = 'auto' | 'ask';
 export type AgentMode = 'plan' | 'act';
 
+/** A queued message plus the moment it becomes eligible to fold into the task (enqueue/edit + grace).
+ *  Internal only — the UI-facing QueuedItem stays {id,text}; readyAt never leaves the session. */
+interface PendingQueuedItem extends QueuedItem { readyAt: number; }
+
 /** Optional worktree support so worker agents can edit + test in isolation and hand results back for the
  *  main agent to integrate. Injected (not built here) to keep AgentSession free of vscode/fs specifics. */
 export interface WorktreeSupport {
@@ -68,7 +72,7 @@ export class AgentSession {
   private lastTurnTokens = 0;
   private contextMode: ContextMode = 'auto';
   private contextLimit = 120000;
-  private queued: QueuedItem[] = [];
+  private queued: PendingQueuedItem[] = [];
   private mode: AgentMode = 'act';
   private maxSteps = 100;
   private genOptions: GenerationOptions = {};
@@ -156,13 +160,18 @@ export class AgentSession {
     this.queued = [];
   }
 
-  /** Queue a message while the agent is working; it's folded into the current task at the next step. */
-  enqueue(prompt: string): string { const id = randomUUID(); this.queued.push({ id, text: prompt }); this.emitQueued(); return id; }
-  /** Edit a still-pending queued message before the agent picks it up. */
-  editQueued(id: string, text: string): void { const item = this.queued.find((q) => q.id === id); if (item) { item.text = text; this.emitQueued(); } }
+  /** Queue a message while the agent is working; folded into the task once its grace window elapses so
+   *  the user has a few seconds to edit or cancel it (and the current step can finish) before pickup. */
+  enqueue(prompt: string): string { const id = randomUUID(); this.queued.push({ id, text: prompt, readyAt: Date.now() + QUEUE_GRACE_MS }); this.emitQueued(); return id; }
+  /** Edit a still-pending queued message before the agent picks it up. Refreshes the grace window so a
+   *  just-changed message isn't grabbed the instant you save it. */
+  editQueued(id: string, text: string): void { const item = this.queued.find((q) => q.id === id); if (item) { item.text = text; item.readyAt = Date.now() + QUEUE_GRACE_MS; this.emitQueued(); } }
+  /** Refresh a pending message's grace window without changing its text — fired when the user opens the
+   *  chip for editing, so the agent won't pick it up out from under them while they type. */
+  touchQueued(id: string): void { const item = this.queued.find((q) => q.id === id); if (item) { item.readyAt = Date.now() + QUEUE_GRACE_MS; } }
   /** Cancel a still-pending queued message (rewind). */
   removeQueued(id: string): void { const before = this.queued.length; this.queued = this.queued.filter((q) => q.id !== id); if (this.queued.length !== before) { this.emitQueued(); } }
-  get queuedItems(): QueuedItem[] { return this.queued.map((q) => ({ ...q })); }
+  get queuedItems(): QueuedItem[] { return this.queued.map((q) => ({ id: q.id, text: q.text })); }
   get hasQueued(): boolean { return this.queued.length > 0; }
   private emitQueued(): void { this.emit({ type: 'queued', items: this.queuedItems }); }
 
@@ -219,7 +228,22 @@ export class AgentSession {
         }
 
         if (calls.length === 0) {
-          if (this.queued.length > 0) { this.emptyResponses = 0; continue; } // user added more work while it was running
+          if (this.queued.length > 0) {
+            // The user added more work while it was running, but a freshly-queued message may still be
+            // inside its grace window (they might be editing it). Rather than finish now — or spin the
+            // model on empty turns — wait out the window HERE without calling the API, polling so an edit
+            // that pushes readyAt back extends the wait. Once something ripens, loop so drainQueue folds
+            // it in. This is what lets the current step finish AND leaves the user time to edit.
+            this.emptyResponses = 0;
+            let wait = this.msUntilQueueReady();
+            while (wait > 0) {
+              this.emit({ type: 'status', message: 'Holding your message a moment — edit or cancel it, or I\'ll pick it up shortly…' });
+              await this.sleepAbortable(Math.min(wait, 1500));
+              if (this.abortController?.signal.aborted) { return; }
+              wait = this.msUntilQueueReady();
+            }
+            continue;
+          }
 
           const decision = decideAfterEmptyTurn({ mode: this.mode, text, stopReason, autoContinues: this.autoContinues, emptyResponses: this.emptyResponses });
           if (decision === 'continue-truncated') {
@@ -360,18 +384,27 @@ export class AgentSession {
     });
   }
 
-  /** Fold any messages the user sent while working into the conversation. */
+  /** Fold any messages whose grace window has elapsed into the conversation. Messages still inside their
+   *  window stay queued (chips stay editable) and get picked up on a later turn once they ripen. */
   private drainQueue(): void {
     if (this.queued.length === 0) { return; }
-    for (const item of this.queued.splice(0)) {
+    const { ready, pending } = splitReadyQueue(this.queued, Date.now());
+    if (ready.length === 0) { return; } // nothing ripe yet — leave the chips alone so the user can still edit
+    this.queued = pending; // keep the ones still in their grace window
+    for (const item of ready) {
       // Frame it so the model KNOWS this arrived mid-task and decides for itself whether to fold it
       // into the current work, finish first then do it, or treat it as a correction — instead of
       // silently appending it as if it were the original request.
       this.messages.push({ role: 'user', content: `[New message added while you were working] ${item.text}\n\n(Acknowledge this in one line — say whether you'll fold it into the current step or finish that first — then keep going. Don't restart work you've already done.)` });
       this.emit({ type: 'tool', name: 'user_message', detail: item.text });
     }
-    this.emitQueued(); // now empty — clears the pending chips in the UI
+    this.emitQueued(); // reflect the remaining (possibly none) — clears the picked-up chips in the UI
   }
+
+  /** Milliseconds until the earliest-ripening queued message can be folded in, or 0 if one is ready now
+   *  (or none are queued). Used at the finish boundary to wait out the grace window instead of grabbing
+   *  a message the instant it's queued or spinning the model on empty turns. */
+  private msUntilQueueReady(): number { return msUntilReady(this.queued, Date.now()); }
 
   stop(): void { this.queued = []; this.emitQueued(); this.answer('[The user stopped the task.]'); this.abortController?.abort(); }
 
@@ -824,6 +857,29 @@ export type EmptyTurnAction = 'continue-truncated' | 'retry-empty' | 'fail-empty
 /** How many fully-empty turns to tolerate before giving up. High so long autonomous runs survive a
  *  bad patch of dropped turns, bounded so a malformed request can't loop forever with no progress. */
 export const EMPTY_RESPONSE_LIMIT = 12;
+
+/** Grace window before a message queued mid-task is folded into the conversation. It gives the user a
+ *  few seconds to edit or cancel the chip before the agent grabs it — and lets the current step finish
+ *  first — instead of the message being digested the instant the next turn boundary lands. Clicking Edit
+ *  or saving an edit refreshes this window (touchQueued/editQueued), so typing a change never races the
+ *  agent. Kept short so a genuine quick follow-up still lands promptly. */
+export const QUEUE_GRACE_MS = 7000;
+
+/** Split queued items into those whose grace window has elapsed (ready to fold into the task) and those
+ *  still pending, at time `now`. Pure + exported so the grace-window behaviour is unit-testable from the
+ *  breaking-input stance instead of only through the live loop. */
+export function splitReadyQueue<T extends { readyAt: number }>(items: readonly T[], now: number): { ready: T[]; pending: T[] } {
+  const ready: T[] = [];
+  const pending: T[] = [];
+  for (const item of items) { (item.readyAt <= now ? ready : pending).push(item); }
+  return { ready, pending };
+}
+
+/** Milliseconds until the earliest queued item ripens; 0 when one is ready now or nothing is queued. */
+export function msUntilReady(items: readonly { readyAt: number }[], now: number): number {
+  if (items.length === 0) { return 0; }
+  return Math.max(0, Math.min(...items.map((i) => i.readyAt)) - now);
+}
 
 /** How many times to nudge a model that announces a step ("I'll map the codebase…") but doesn't call
  *  the tool. Set high on purpose: the user proved a couple of manual retries gets it acting, so the

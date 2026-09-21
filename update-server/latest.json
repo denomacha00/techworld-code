@@ -1,6 +1,6 @@
 {
-  "version": "1.10.0",
-  "vsixUrl": "/releases/techword-code-1.10.0.vsix",
-  "notes": "Sharper coding: the agent now adversarially tests its own work, grounds edge cases in the real domain, treats internal contradictions as bugs, and never trusts a passing test it can't explain.",
-  "sha256": "33428c8134fd3c726beaf7db19e63344979d7cf810417ccb1c4eaac70965113e"
+  "version": "1.10.1",
+  "vsixUrl": "/releases/techword-code-1.10.1.vsix",
+  "notes": "Queued messages now wait a few seconds before the agent picks them up, so you can edit or cancel them first — and the current step finishes before your message is folded in.",
+  "sha256": "47768378f1333e261a3e0bf0e88704a9f00713cd96833e50cdf0d48e0f8e5682"
 }

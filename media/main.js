@@ -860,6 +860,9 @@
   }
 
   function startEditQueued(chip, item) {
+    // Tell the host we're editing so it refreshes this message's grace window and won't fold it into
+    // the task while the user is still typing.
+    vscode.postMessage({ kind: 'touchQueued', id: item.id });
     chip.innerHTML = '';
     chip.classList.add('editing');
     const ta = document.createElement('textarea');

@@ -542,6 +542,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       case 'cancelQueued':
         if (typeof input.id === 'string' && this.session) { this.session.removeQueued(input.id); }
         break;
+      case 'touchQueued': // user opened the chip to edit — hold it so the agent doesn't grab it mid-edit
+        if (typeof input.id === 'string' && this.session) { this.session.touchQueued(input.id); }
+        break;
       case 'stop': this.stop(); break;
       case 'newTask': await this.newTask(); break;
       case 'attach': await this.attach(); break;
