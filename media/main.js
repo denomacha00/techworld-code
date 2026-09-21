@@ -47,6 +47,7 @@
     workbarText: document.getElementById('workbarText'),
     transcriptBtn: document.getElementById('transcriptBtn'),
     transcript: document.getElementById('transcript'),
+    transcriptClose: document.getElementById('transcriptClose'),
     transcriptList: document.getElementById('transcriptList'),
     queued: document.getElementById('queued'),
   };
@@ -1162,6 +1163,7 @@
     if (show && el.transcriptList) { el.transcriptList.scrollTop = el.transcriptList.scrollHeight; }
   }
   if (el.transcriptBtn) { el.transcriptBtn.addEventListener('click', () => toggleTranscript()); }
+  if (el.transcriptClose) { el.transcriptClose.addEventListener('click', () => toggleTranscript(false)); }
   function toggleModeMenu(open) {
     const show = open === undefined ? el.modeMenu.classList.contains('hidden') : open;
     el.modeMenu.classList.toggle('hidden', !show);
