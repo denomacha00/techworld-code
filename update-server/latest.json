@@ -1,6 +1,6 @@
 {
-  "version": "1.11.0",
-  "vsixUrl": "/releases/techword-code-1.11.0.vsix",
-  "notes": "No time limit on terminal commands — a long build runs as long as it keeps working. New background commands: start a long build or dev server, keep working, and check on it. Nothing gets cut off anymore.",
-  "sha256": "0ce5c278e57a949294935197dd3bb5a467c664851b5bac7f444763fa3150671b"
+  "version": "1.11.1",
+  "vsixUrl": "/releases/techword-code-1.11.1.vsix",
+  "notes": "Techword Code 1.11.1.",
+  "sha256": "319bc71b0cd3766936553b10ca9a7d2d78de17ccdf63ada147539522772d029e"
 }

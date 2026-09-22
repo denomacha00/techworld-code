@@ -457,7 +457,11 @@ export class WorkspaceToolExecutor {
     // Force non-interactive so a credential/passphrase prompt fails fast instead of hanging forever with
     // no output. GIT_TERMINAL_PROMPT=0 makes git error out; GIT_ASKPASS/SSH pointed at a no-op refuses
     // GUI/askpass popups too. Also strip our own provider keys so a spawned tool can't read them.
-    const env: NodeJS.ProcessEnv = { ...process.env, ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo', GCM_INTERACTIVE: 'Never', GIT_PAGER: 'cat', PAGER: 'cat' };
+    // PYTHONUNBUFFERED makes a Python child (PyInstaller, pip, a build script) stream its output line by
+    // line instead of block-buffering it into the pipe — so the inactivity watchdog SEES the build working
+    // and never false-kills a healthy long build; PYTHONIOENCODING=utf-8 stops it dying on a non-ASCII
+    // character under a cp1252 console (a filename with emoji, a smart quote in a log line).
+    const env: NodeJS.ProcessEnv = { ...process.env, ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'echo', SSH_ASKPASS: 'echo', GCM_INTERACTIVE: 'Never', GIT_PAGER: 'cat', PAGER: 'cat', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' };
     // detached on POSIX makes the child its own process-group leader, so process.kill(-pid) can take down
     // the whole tree (git + credential helper, npm + sub-processes) instead of just the shell.
     return spawn(shell, args, { cwd, windowsHide: true, env, detached: !isWin });
@@ -530,8 +534,9 @@ export class WorkspaceToolExecutor {
 
   // ---------- background commands (survive across turns, so a long build/dev server never gets cut off) ----------
   //
-  // A foreground runCommand blocks the agent and is capped at 600s, so a 15-minute PyInstaller build or a
-  // dev server can NEVER complete — the turn ends first. These are spawned in the extension-host process
+  // A foreground runCommand blocks the agent for the whole run and its inactivity watchdog can trip during
+  // a long QUIET phase (PyInstaller's final COLLECT copying hundreds of MB, antivirus scanning each file),
+  // so a 15-minute build is safest here. These are spawned in the extension-host process
   // (which long outlives any single turn) and TRACKED here instead of being killed on return, so the agent
   // can start one, keep working, and poll it on a later turn. Output accumulates into a capped ring buffer.
   private readonly background = new Map<string, BackgroundProcess>();

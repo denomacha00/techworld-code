@@ -627,7 +627,7 @@ export class AgentSession {
           return `Applied ${edits.length} change(s) in the isolated worktree: ${edits.map((edit) => edit.path).join(', ')}`;
         }
         case 'run_terminal_command': {
-          const proposal: CommandProposal = { command: requiredString(args, 'command'), cwd: stringArg(args, 'cwd', ''), purpose: requiredString(args, 'purpose'), timeoutMs: numberArg(args, 'timeoutMs', 120000) };
+          const proposal: CommandProposal = { command: requiredString(args, 'command'), cwd: stringArg(args, 'cwd', ''), purpose: requiredString(args, 'purpose'), timeoutMs: numberArg(args, 'timeoutMs', 180000) };
           const approval = this.approvals.request(proposal);
           const id = randomUUID();
           this.emit({ type: 'tool', name: 'run_terminal_command', detail: proposal.command });
