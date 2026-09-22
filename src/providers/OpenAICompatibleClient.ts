@@ -1,4 +1,5 @@
 import { type ChatMessage, type ContentPart, type ModelInfo, type ProviderConfig, type StreamDelta, type ThinkingBlock, type ToolCall } from '../types';
+import { type BillingUsd, parseBillingUsd } from './billing';
 
 // NOTE: The Techword API serves the Anthropic Messages API at /v1/messages. The OpenAI
 // /v1/chat/completions path is blocked upstream by a Cloudflare bot check, so this client speaks
@@ -224,6 +225,31 @@ export class OpenAICompatibleClient {
     if (!response.ok) { throw await this.failure(response); }
     const body = await response.json() as OpenAIModelResponse;
     return (body.data ?? []).flatMap((model) => model.id ? [{ id: model.id, displayName: model.name }] : []);
+  }
+
+  /** Read this key's REAL spend from the gateway's billing meter (dollars deducted so far) and its cap.
+   *  This is the exact number the provider charges — it already includes the input/output price
+   *  difference and any hedge overhead — so it's shown in place of the token-based estimate. Best-effort:
+   *  returns undefined on any failure (older gateway, network blip) so the counter simply falls back to
+   *  the estimate and a run is never affected. `meterInCents` divides total_usage by 100 (OpenAI
+   *  convention); the caller passes the user's setting. */
+  async fetchBillingUsd(meterInCents: boolean, signal?: AbortSignal): Promise<BillingUsd | undefined> {
+    try {
+      const sig = signal ?? AbortSignal.timeout(15000);
+      const [usageRes, subRes] = await Promise.all([
+        fetch(this.endpoint('/dashboard/billing/usage'), { headers: this.headers(), signal: sig }),
+        fetch(this.endpoint('/dashboard/billing/subscription'), { headers: this.headers(), signal: sig }),
+      ]);
+      if (!usageRes.ok) { return undefined; }
+      const usage = await usageRes.json() as { total_usage?: unknown };
+      if (typeof usage.total_usage !== 'number') { return undefined; }
+      let hardLimitUsd: number | undefined;
+      if (subRes.ok) {
+        const sub = await subRes.json() as { hard_limit_usd?: unknown };
+        if (typeof sub.hard_limit_usd === 'number') { hardLimitUsd = sub.hard_limit_usd; }
+      }
+      return parseBillingUsd({ totalUsage: usage.total_usage, hardLimitUsd }, meterInCents);
+    } catch { return undefined; }
   }
 
   async *streamCompletion(messages: ChatMessage[], tools: unknown[], signal?: AbortSignal): AsyncGenerator<StreamDelta> {

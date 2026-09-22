@@ -36,6 +36,7 @@ type OutMessage =
   | { kind: 'approvalRequest'; request: ApprovalRequest; auto: boolean; warning?: string }
   | { kind: 'approvalResolved'; id: string; approved: boolean }
   | { kind: 'usage'; total: number; window?: number; limit?: number; usdPerMillion?: number; showCost?: boolean }
+  | { kind: 'billing'; spentUsd: number; limitUsd?: number; meterInCents: boolean }
   | { kind: 'connection'; ok: boolean; message: string; latencyMs?: number; models?: string[] }
   | { kind: 'attachments'; items: Array<{ id: string; name: string; kind: 'image' | 'text'; dataUrl?: string }> }
   | { kind: 'history'; items: ConversationMeta[]; currentId?: string }
@@ -114,10 +115,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private post(message: OutMessage): void { void this.view?.webview.postMessage(message); }
 
-  /** Cost-display settings for the usage counter: whether to show USD and the price per million tokens. */
-  private costConfig(): { showCost: boolean; usdPerMillion: number } {
+  /** Cost-display settings for the usage counter: whether to show USD, the estimate rate per million
+   *  tokens (fallback before the real meter is read), and whether the provider's meter is in cents. */
+  private costConfig(): { showCost: boolean; usdPerMillion: number; meterInCents: boolean } {
     const config = vscode.workspace.getConfiguration('techwordCode');
-    return { showCost: config.get<boolean>('showCostInUsd', true), usdPerMillion: config.get<number>('usdPerMillionTokens', 1.6111) };
+    return {
+      showCost: config.get<boolean>('showCostInUsd', true),
+      usdPerMillion: config.get<number>('usdPerMillionTokens', 1.6111),
+      meterInCents: config.get<boolean>('usageMeterInCents', true),
+    };
   }
 
   private emit(event: AgentEvent): void {
@@ -132,6 +138,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       case 'question': this.post({ kind: 'question', text: event.text, options: event.options }); break;
       case 'preview': this.post({ kind: 'preview', dataUrl: event.dataUrl, name: event.name }); break;
       case 'usage': { const c = this.costConfig(); this.post({ kind: 'usage', total: event.total, window: event.window, limit: event.limit, usdPerMillion: c.usdPerMillion, showCost: c.showCost }); break; }
+      case 'billing': this.post({ kind: 'billing', spentUsd: event.spentUsd, limitUsd: event.limitUsd, meterInCents: event.meterInCents }); break;
       case 'compacted': this.post({ kind: 'compacted', message: event.message }); this.scheduleSave(); break; // context was rewritten — persist so a reload doesn't lose the summary
       case 'queued': this.post({ kind: 'queued', items: event.items }); break;
       case 'thinking': this.post({ kind: 'thinking', text: event.text }); break; // real reasoning → Activity panel
@@ -188,6 +195,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.session.setMaxSteps(config.get<number>('maxSteps', 100));
     this.session.setGenerationOptions({ maxTokens: config.get<number>('maxTokens', 8192), temperature: config.get<number>('temperature', 0), thinking: config.get<boolean>('showThinking', false), thinkingBudget: config.get<number>('thinkingBudget', 2048) });
     this.session.setWebFetchEnabled(config.get<boolean>('enableWebFetch', true));
+    this.session.setCostOptions(config.get<boolean>('showCostInUsd', true), config.get<boolean>('usageMeterInCents', true));
     this.session.setMode(this.mode);
     this.session.setProjectRules(await this.composeRules(config));
     this.session.setMemorySink(this.memorySink());
@@ -708,6 +716,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.pendingAttachments = [];
     this.post({ kind: 'load', title: stored.title, items: this.displayFrom(stored.messages) });
     { const c = this.costConfig(); this.post({ kind: 'usage', total: stored.totalTokens, usdPerMillion: c.usdPerMillion, showCost: c.showCost }); }
+    void session.refreshBilling(); // show real spend for this key on open, before the first turn
     await this.postState();
   }
 

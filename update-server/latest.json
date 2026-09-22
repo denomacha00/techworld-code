@@ -1,6 +1,6 @@
 {
-  "version": "1.11.2",
-  "vsixUrl": "/releases/techword-code-1.11.2.vsix",
-  "notes": "Techword Code 1.11.2.",
-  "sha256": "1b6b23868c1ac8722a1688a21e7176d1d0749ee515bf5188688a7f5f752d8625"
+  "version": "1.11.3",
+  "vsixUrl": "/releases/techword-code-1.11.3.vsix",
+  "notes": "Techword Code 1.11.3.",
+  "sha256": "66bde5e61f67c88300a8bce5d5f67d96e2061589890e78ecfd79c63ffc0d5214"
 }

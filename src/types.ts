@@ -182,6 +182,7 @@ export type AgentEvent =
   | { type: 'question'; text: string; options?: string[] }
   | { type: 'preview'; dataUrl: string; name: string }
   | { type: 'usage'; total: number; window?: number; limit?: number }
+  | { type: 'billing'; spentUsd: number; limitUsd?: number; meterInCents: boolean }
   | { type: 'compacted'; message: string }
   | { type: 'queued'; items: QueuedItem[] }
   | { type: 'error'; message: string }

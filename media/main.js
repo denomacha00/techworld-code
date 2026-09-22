@@ -1027,8 +1027,25 @@
     if (dollars > 0) { return '$' + dollars.toFixed(4); }
     return '$0.00';
   }
+  // Real spend, read from the provider's per-key billing meter (dollars actually deducted — the
+  // input/output price difference is already baked in). Once we have it, it OVERRIDES the token
+  // estimate, because it's the exact number the provider charges. Kept here so a later token 'usage'
+  // event can't overwrite the real figure with an estimate.
+  var lastBilling = null;
+  function renderBilling(m) {
+    if (!el.usage || typeof m.spentUsd !== 'number') { return; }
+    lastBilling = m;
+    var text = formatUsd(m.spentUsd);
+    if (typeof m.limitUsd === 'number' && m.limitUsd > 0) { text += ' / ' + formatUsd(m.limitUsd); }
+    el.usage.textContent = text;
+    el.usage.title = 'Real spend for this key: ' + formatUsd(m.spentUsd)
+      + (m.limitUsd ? ' of a ' + formatUsd(m.limitUsd) + ' cap' : '')
+      + '  ·  from the provider billing meter' + (m.meterInCents ? ' (cents)' : ' (dollars)');
+  }
   function renderUsage(m) {
     if (!el.usage) { return; }
+    // Real meter wins: if we've seen a billing figure, don't let a token estimate overwrite it.
+    if (lastBilling) { return; }
     var total = (typeof m.total === 'number' && m.total > 0) ? m.total : 0;
     if (!total) { el.usage.textContent = ''; el.usage.removeAttribute('title'); return; }
     var tokenText = total.toLocaleString() + ' tokens';
@@ -1036,7 +1053,7 @@
     if (m.showCost !== false && rate > 0) {
       var dollars = total * rate / 1000000;
       el.usage.textContent = formatUsd(dollars);
-      el.usage.title = tokenText + '  ·  ' + formatUsd(dollars) + ' at $' + rate + '/M tokens';
+      el.usage.title = tokenText + '  ·  ~' + formatUsd(dollars) + ' est. at $' + rate + '/M tokens (until the real meter loads)';
     } else {
       el.usage.textContent = tokenText;
       el.usage.title = tokenText;
@@ -1188,6 +1205,8 @@
     cancelActivityClear();
     el.log.innerHTML = '';
     el.usage.textContent = '';
+    el.usage.removeAttribute('title');
+    lastBilling = null; // drop the previous key's real-spend figure; the next turn re-reads the meter
     updateContextRing(0, 0); // fresh chat → empty ring
     endAssistant();
     clearStatus();
@@ -1350,6 +1369,7 @@
       case 'approvalRequest': addApproval(m.request, m.auto, m.warning); break;
       case 'approvalResolved': resolveApproval(m.id, m.approved); break;
       case 'usage': renderUsage(m); updateContextRing(m.window, m.limit); break;
+      case 'billing': renderBilling(m); break;
       case 'compacted': addNote('↺ ' + m.message); break;
       case 'attachments': renderAttachments(m.items); break;
       case 'history': renderHistory(m.items, m.currentId); break;

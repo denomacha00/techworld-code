@@ -2,7 +2,7 @@
   "name": "techword-code",
   "displayName": "Techword Code",
   "description": "Techword Code is an approval-first coding agent powered by Techword API.",
-  "version": "1.11.2",
+  "version": "1.11.3",
   "publisher": "techwordcode",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "resources/icon.png",
@@ -100,7 +100,12 @@
           "type": "number",
           "default": 1.6111,
           "minimum": 0,
-          "description": "Price in USD per 1,000,000 tokens, used to show the usage counter in dollars. Default (1.6111) matches the observed rate of about $5.00 per 3,103,392 tokens; change it if your provider's pricing differs."
+          "description": "Estimate price in USD per 1,000,000 tokens. Used only as a fallback before your key's real spend meter is read (or if that meter is unavailable). Default (1.6111) matches about $5.00 per 3,103,392 tokens; change it if your provider's pricing differs."
+        },
+        "techwordCode.usageMeterInCents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether your provider's billing meter (dashboard/billing/usage) reports spend in cents (the usual convention: $5.00 shows as 500) rather than dollars. Leave on unless the cost counter reads 100x too high, then turn it off. The exact meter value is shown in the counter's hover tooltip."
         },
         "techwordCode.contextMode": {
           "type": "string",

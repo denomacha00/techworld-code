@@ -104,6 +104,23 @@ const cases = [
 for (const c of cases) { const got = usageText(c.in); if (got !== c.want) { die('USAGE_FAIL (' + c.why + '): got ' + JSON.stringify(got) + ' want ' + JSON.stringify(c.want)); } }
 console.log('USAGE_OK: cost-in-USD rendering holds for ' + cases.length + ' cases');
 
+// Real billing meter → the exact dollars the provider deducted for this key. Fire 'billing' through the
+// REAL renderBilling and assert the shipped text. Breaking inputs: a spend-against-cap ($x / $y), a fresh
+// key (0 spend must read $0.00, not blank), and no cap (spend only, no bar). The CRUCIAL one: once a real
+// figure is in, a later token 'usage' estimate must NOT overwrite it — the meter is exact, the estimate
+// isn't. This ordering matters, so run it AFTER the USAGE_OK cases (which need lastBilling still null).
+function billingText(m) { fire(Object.assign({ kind: 'billing', meterInCents: true }, m)); return byId['usage']._text; }
+const bcases = [
+  { in: { spentUsd: 0, limitUsd: 1 }, want: '$0.00 / $1.00', why: 'a fresh $1 key reads $0.00 / $1.00, never blank' },
+  { in: { spentUsd: 0.5, limitUsd: undefined }, want: '$0.500', why: 'no cap shows spend only, no bar' },
+  { in: { spentUsd: 1, limitUsd: 1 }, want: '$1.00 / $1.00', why: 'the $1 test key spent out reads exactly $1.00 / $1.00' },
+];
+for (const c of bcases) { const got = billingText(c.in); if (got !== c.want) { die('BILLING_FAIL (' + c.why + '): got ' + JSON.stringify(got) + ' want ' + JSON.stringify(c.want)); } }
+// lastBilling is now set ($1.00 / $1.00). A token estimate that would otherwise read $5.00 must be ignored.
+const afterMeter = usageText({ total: 3103392, usdPerMillion: 1.6111, showCost: true });
+if (afterMeter !== '$1.00 / $1.00') { die('BILLING_FAIL (real meter must override the token estimate): got ' + JSON.stringify(afterMeter) + ' want "$1.00 / $1.00"'); }
+console.log('BILLING_OK: real-meter rendering + estimate-override holds for ' + (bcases.length + 1) + ' cases');
+
 // Assert the Brain gate: after this sequence, the panel must hold ONLY the one reasoning row.
 setTimeout(() => {
   const list = byId['transcriptList'];

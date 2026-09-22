@@ -85,6 +85,10 @@ export class AgentSession {
   private mcp: McpHub | undefined;
   private autoContinues = 0;
   private emptyResponses = 0;
+  // Cost display: read the provider's real spend meter (per-key dollars) instead of estimating from
+  // tokens. showCost gates whether we bother; meterInCents matches the gateway's total_usage unit.
+  private showCostUsd = true;
+  private meterInCents = true;
 
   constructor(
     private provider: ProviderConfig,
@@ -102,6 +106,19 @@ export class AgentSession {
   /** Update model/provider mid-conversation without losing history. */
   setProvider(provider: ProviderConfig): void { this.provider = provider; }
   setApiKey(apiKey: string): void { this.apiKey = apiKey; }
+  setCostOptions(showCostUsd: boolean, meterInCents: boolean): void { this.showCostUsd = showCostUsd; this.meterInCents = meterInCents; }
+
+  /** Read the provider's REAL spend meter for this key and emit it, so the counter shows exact dollars
+   *  deducted (input/output difference included) rather than a token estimate. Best-effort and fire-and-
+   *  forget: any failure is swallowed and the counter just keeps showing the token-based fallback. */
+  async refreshBilling(): Promise<void> {
+    if (!this.showCostUsd) { return; }
+    try {
+      const client = new OpenAICompatibleClient(this.provider, this.apiKey, {});
+      const billing = await client.fetchBillingUsd(this.meterInCents);
+      if (billing) { this.emit({ type: 'billing', spentUsd: billing.spentUsd, limitUsd: billing.limitUsd, meterInCents: this.meterInCents }); }
+    } catch { /* meter is best-effort — never let it break a run */ }
+  }
 
   /** Inject repo instruction files (AGENTS.md etc.) into the system prompt. */
   setProjectRules(rules: string): void {
@@ -219,6 +236,7 @@ export class AgentSession {
         this.emit({ type: 'status', message: 'Working…' });
         const turn_ = await this.streamTurn(client);
         if (!turn_) { return; } // user stopped
+        void this.refreshBilling(); // fire-and-forget: read the real spend meter after each turn, never block on it
         const { text, calls, stopReason, thinkingBlocks } = turn_;
         if (text || calls.length > 0) {
           const assistant: ChatMessage = { role: 'assistant', content: text, tool_calls: calls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } })) };
