@@ -786,7 +786,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 <title>Techword Code</title></head>
 <body>
 <header id="topbar">
-  <div class="brand"><span class="dot" id="statusDot"></span><span>Techword Code</span></div>
+  <div class="brand"><span class="dot" id="statusDot"></span><span>Techword Code</span><span id="keyTotal" class="key-total hidden" title="Total spent on this API key"></span></div>
   <div class="actions">
     <button id="expandBtn" class="icon winctl" title="Expand / restore width" aria-label="Expand or restore width">⛶</button>
     <button id="minimizeBtn" class="icon winctl" title="Minimize (hide panel)" aria-label="Minimize (hide panel)">▁</button>

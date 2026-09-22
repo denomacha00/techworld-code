@@ -88,38 +88,42 @@ const seq = [
 for (const m of seq) { fire(m); }
 console.log('MSG_OK: fired ' + seq.length + ' message kinds, no throw');
 
-// Usage counter → USD. Fire known totals through the REAL renderUsage in main.js and assert the shipped
-// output, so this tests the code that ships, not a copy of the formula. Rate 1.6111/M is the observed
-// $5.00 ≈ 3,103,392 tokens. Breaking inputs: the exact cap (must read ~$5.00), a small amount (must NOT
-// round to $0.00), cost switched off (must fall back to tokens), and a zero/absent rate (same fallback).
+// Per-CHAT counter → TOKENS, never dollars. Fire totals through the REAL renderUsage in main.js and assert
+// the shipped el.usage text. The money figure lives in the HEADER (keyTotal), not here — so the breaking
+// inputs are: comma grouping on a big total, a small total still shown, a cost rate present must NOT turn
+// this into dollars (the whole point of the two-location split), cost switched off is still tokens, and
+// zero shows nothing. The '$' guard is the regression the user explicitly asked to prevent.
 function usageText(m) { fire(Object.assign({ kind: 'usage' }, m)); return byId['usage']._text; }
 const cases = [
-  { in: { total: 3103392, usdPerMillion: 1.6111, showCost: true }, want: '$5.00', why: 'the $5 cap reads back as ~$5.00' },
-  { in: { total: 10000, usdPerMillion: 1.6111, showCost: true }, want: '$0.016', why: 'a small spend keeps 3 decimals, not $0.00' },
-  { in: { total: 1000, usdPerMillion: 1.6111, showCost: true }, want: '$0.0016', why: 'a tiny spend keeps 4 decimals, still visible' },
-  { in: { total: 1234, usdPerMillion: 1.6111, showCost: false }, want: '1,234 tokens', why: 'cost OFF falls back to the token count' },
-  { in: { total: 1234, usdPerMillion: 0, showCost: true }, want: '1,234 tokens', why: 'no known rate falls back to the token count' },
+  { in: { total: 3103392, usdPerMillion: 1.6111, showCost: true }, want: '3,103,392 tokens this chat', why: 'a big total groups with commas and stays TOKENS even with a rate set' },
+  { in: { total: 10000, usdPerMillion: 1.6111, showCost: true }, want: '10,000 tokens this chat', why: 'a rate present must not turn the per-chat figure into dollars' },
+  { in: { total: 1234, usdPerMillion: 0, showCost: true }, want: '1,234 tokens this chat', why: 'no rate: still tokens' },
+  { in: { total: 1234, usdPerMillion: 1.6111, showCost: false }, want: '1,234 tokens this chat', why: 'cost OFF: still tokens' },
   { in: { total: 0, usdPerMillion: 1.6111, showCost: true }, want: '', why: 'zero usage shows nothing' },
 ];
-for (const c of cases) { const got = usageText(c.in); if (got !== c.want) { die('USAGE_FAIL (' + c.why + '): got ' + JSON.stringify(got) + ' want ' + JSON.stringify(c.want)); } }
-console.log('USAGE_OK: cost-in-USD rendering holds for ' + cases.length + ' cases');
+for (const c of cases) {
+  const got = usageText(c.in);
+  if (got !== c.want) { die('USAGE_FAIL (' + c.why + '): got ' + JSON.stringify(got) + ' want ' + JSON.stringify(c.want)); }
+  if (got.indexOf('$') !== -1) { die('USAGE_FAIL (per-chat must be tokens, never USD): ' + JSON.stringify(got)); }
+}
+console.log('USAGE_OK: per-chat token rendering holds for ' + cases.length + ' cases');
 
-// Real billing meter → the exact dollars the provider deducted for this key. Fire 'billing' through the
-// REAL renderBilling and assert the shipped text. Breaking inputs: a spend-against-cap ($x / $y), a fresh
-// key (0 spend must read $0.00, not blank), and no cap (spend only, no bar). The CRUCIAL one: once a real
-// figure is in, a later token 'usage' estimate must NOT overwrite it — the meter is exact, the estimate
-// isn't. This ordering matters, so run it AFTER the USAGE_OK cases (which need lastBilling still null).
-function billingText(m) { fire(Object.assign({ kind: 'billing', meterInCents: true }, m)); return byId['usage']._text; }
+// Whole-KEY meter → USD in the HEADER (keyTotal), independent of the per-chat token counter. Fire 'billing'
+// through the REAL renderBilling and assert byId['keyTotal']. Breaking inputs: spend-against-cap ($x / $y),
+// a fresh key (0 → $0.00, never blank), and no cap (spend only, no ' / '). The CRUCIAL one: the two figures
+// are INDEPENDENT now — a later token 'usage' updates el.usage WITHOUT touching keyTotal, and vice versa.
+function keyTotalText(m) { fire(Object.assign({ kind: 'billing', meterInCents: true }, m)); return byId['keyTotal']._text; }
 const bcases = [
   { in: { spentUsd: 0, limitUsd: 1 }, want: '$0.00 / $1.00', why: 'a fresh $1 key reads $0.00 / $1.00, never blank' },
   { in: { spentUsd: 0.5, limitUsd: undefined }, want: '$0.500', why: 'no cap shows spend only, no bar' },
   { in: { spentUsd: 1, limitUsd: 1 }, want: '$1.00 / $1.00', why: 'the $1 test key spent out reads exactly $1.00 / $1.00' },
 ];
-for (const c of bcases) { const got = billingText(c.in); if (got !== c.want) { die('BILLING_FAIL (' + c.why + '): got ' + JSON.stringify(got) + ' want ' + JSON.stringify(c.want)); } }
-// lastBilling is now set ($1.00 / $1.00). A token estimate that would otherwise read $5.00 must be ignored.
-const afterMeter = usageText({ total: 3103392, usdPerMillion: 1.6111, showCost: true });
-if (afterMeter !== '$1.00 / $1.00') { die('BILLING_FAIL (real meter must override the token estimate): got ' + JSON.stringify(afterMeter) + ' want "$1.00 / $1.00"'); }
-console.log('BILLING_OK: real-meter rendering + estimate-override holds for ' + (bcases.length + 1) + ' cases');
+for (const c of bcases) { const got = keyTotalText(c.in); if (got !== c.want) { die('BILLING_FAIL (' + c.why + '): got ' + JSON.stringify(got) + ' want ' + JSON.stringify(c.want)); } }
+// keyTotal is now '$1.00 / $1.00'. A per-chat usage event must set el.usage to tokens and leave keyTotal alone.
+const perChatAfter = usageText({ total: 3103392, usdPerMillion: 1.6111, showCost: true });
+if (perChatAfter !== '3,103,392 tokens this chat') { die('SPLIT_FAIL (usage must set the per-chat node to tokens): got ' + JSON.stringify(perChatAfter)); }
+if (byId['keyTotal']._text !== '$1.00 / $1.00') { die('SPLIT_FAIL (a usage event must NOT overwrite the header key total): got ' + JSON.stringify(byId['keyTotal']._text)); }
+console.log('BILLING_OK: header key-total + independence from the per-chat counter holds for ' + (bcases.length + 1) + ' cases');
 
 // Assert the Brain gate: after this sequence, the panel must hold ONLY the one reasoning row.
 setTimeout(() => {

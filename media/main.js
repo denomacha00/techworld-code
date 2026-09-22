@@ -20,6 +20,7 @@
     settingsModel: document.getElementById('settingsModel'),
     statusDot: document.getElementById('statusDot'),
     usage: document.getElementById('usage'),
+    keyTotal: document.getElementById('keyTotal'),
     ctxRing: document.getElementById('ctxRing'),
     ctxArc: document.getElementById('ctxArc'),
     attachBtn: document.getElementById('attachBtn'),
@@ -1028,36 +1029,28 @@
     return '$0.00';
   }
   // Real spend, read from the provider's per-key billing meter (dollars actually deducted — the
-  // input/output price difference is already baked in). Once we have it, it OVERRIDES the token
-  // estimate, because it's the exact number the provider charges. Kept here so a later token 'usage'
-  // event can't overwrite the real figure with an estimate.
-  var lastBilling = null;
+  // input/output price difference is already baked in). This is the WHOLE-KEY total and shows UP in
+  // the header next to the name as "$spent / $cap"; it does NOT reset per chat (the key is the key).
   function renderBilling(m) {
-    if (!el.usage || typeof m.spentUsd !== 'number') { return; }
-    lastBilling = m;
+    if (!el.keyTotal || typeof m.spentUsd !== 'number') { return; }
     var text = formatUsd(m.spentUsd);
     if (typeof m.limitUsd === 'number' && m.limitUsd > 0) { text += ' / ' + formatUsd(m.limitUsd); }
-    el.usage.textContent = text;
-    el.usage.title = 'Real spend for this key: ' + formatUsd(m.spentUsd)
+    el.keyTotal.textContent = text;
+    el.keyTotal.classList.remove('hidden');
+    el.keyTotal.title = 'Total spent on this API key: ' + formatUsd(m.spentUsd)
       + (m.limitUsd ? ' of a ' + formatUsd(m.limitUsd) + ' cap' : '')
-      + '  ·  from the provider billing meter' + (m.meterInCents ? ' (cents)' : ' (dollars)');
+      + '  ·  live from the provider billing meter';
   }
+  // Per-CHAT token count, shown down by the composer. The provider only meters spend per KEY, not per
+  // conversation, so the money figure lives UP in the header (renderBilling, "$spent / $cap"); here we just
+  // count THIS chat's tokens, which resets when you start a new chat. Never dollars — that's the header's job.
   function renderUsage(m) {
     if (!el.usage) { return; }
-    // Real meter wins: if we've seen a billing figure, don't let a token estimate overwrite it.
-    if (lastBilling) { return; }
     var total = (typeof m.total === 'number' && m.total > 0) ? m.total : 0;
     if (!total) { el.usage.textContent = ''; el.usage.removeAttribute('title'); return; }
     var tokenText = total.toLocaleString() + ' tokens';
-    var rate = (typeof m.usdPerMillion === 'number' && m.usdPerMillion > 0) ? m.usdPerMillion : 0;
-    if (m.showCost !== false && rate > 0) {
-      var dollars = total * rate / 1000000;
-      el.usage.textContent = formatUsd(dollars);
-      el.usage.title = tokenText + '  ·  ~' + formatUsd(dollars) + ' est. at $' + rate + '/M tokens (until the real meter loads)';
-    } else {
-      el.usage.textContent = tokenText;
-      el.usage.title = tokenText;
-    }
+    el.usage.textContent = tokenText + ' this chat';
+    el.usage.title = 'This chat: ' + tokenText + '  ·  resets on a new chat (the header shows the real whole-key spend in USD)';
   }
 
   // The blue context ring (Claude-Code style): fills as the current request fills the context window,
@@ -1206,7 +1199,7 @@
     el.log.innerHTML = '';
     el.usage.textContent = '';
     el.usage.removeAttribute('title');
-    lastBilling = null; // drop the previous key's real-spend figure; the next turn re-reads the meter
+    // el.keyTotal (whole-key USD) is intentionally NOT reset — the key is the key across chats.
     updateContextRing(0, 0); // fresh chat → empty ring
     endAssistant();
     clearStatus();
