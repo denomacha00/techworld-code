@@ -1015,6 +1015,34 @@
     scrollToBottom();
   }
 
+  // The usage counter. Shows an estimated cost in USD (default) using the same running token total,
+  // converted at the provider's price-per-million rate (settable in Settings). Falls back to a raw
+  // token count when cost display is off or no rate is known. The exact token count is always kept in
+  // the hover tooltip so the underlying number is never lost.
+  function formatUsd(dollars) {
+    // Show enough decimals that a small session isn't rounded to a meaningless $0.00: cents once we're
+    // past a dollar, more precision for tiny amounts so early spend is still visible.
+    if (dollars >= 1) { return '$' + dollars.toFixed(2); }
+    if (dollars >= 0.01) { return '$' + dollars.toFixed(3); }
+    if (dollars > 0) { return '$' + dollars.toFixed(4); }
+    return '$0.00';
+  }
+  function renderUsage(m) {
+    if (!el.usage) { return; }
+    var total = (typeof m.total === 'number' && m.total > 0) ? m.total : 0;
+    if (!total) { el.usage.textContent = ''; el.usage.removeAttribute('title'); return; }
+    var tokenText = total.toLocaleString() + ' tokens';
+    var rate = (typeof m.usdPerMillion === 'number' && m.usdPerMillion > 0) ? m.usdPerMillion : 0;
+    if (m.showCost !== false && rate > 0) {
+      var dollars = total * rate / 1000000;
+      el.usage.textContent = formatUsd(dollars);
+      el.usage.title = tokenText + '  ·  ' + formatUsd(dollars) + ' at $' + rate + '/M tokens';
+    } else {
+      el.usage.textContent = tokenText;
+      el.usage.title = tokenText;
+    }
+  }
+
   // The blue context ring (Claude-Code style): fills as the current request fills the context window,
   // and drops back down after a compact (window shrinks). window = tokens in the last request, limit =
   // the context budget. Both come from the 'usage' event.
@@ -1321,7 +1349,7 @@
       case 'cmdResult': showCmdResult(m.token, m.output, m.failed); break; // faded terminal output under a Run button
       case 'approvalRequest': addApproval(m.request, m.auto, m.warning); break;
       case 'approvalResolved': resolveApproval(m.id, m.approved); break;
-      case 'usage': el.usage.textContent = m.total ? m.total.toLocaleString() + ' tokens' : ''; updateContextRing(m.window, m.limit); break;
+      case 'usage': renderUsage(m); updateContextRing(m.window, m.limit); break;
       case 'compacted': addNote('↺ ' + m.message); break;
       case 'attachments': renderAttachments(m.items); break;
       case 'history': renderHistory(m.items, m.currentId); break;

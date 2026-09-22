@@ -2,7 +2,7 @@
   "name": "techword-code",
   "displayName": "Techword Code",
   "description": "Techword Code is an approval-first coding agent powered by Techword API.",
-  "version": "1.11.1",
+  "version": "1.11.2",
   "publisher": "techwordcode",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "resources/icon.png",
@@ -90,6 +90,17 @@
           "minimum": 1000,
           "maximum": 100000,
           "description": "Maximum characters returned by a workspace or terminal tool."
+        },
+        "techwordCode.showCostInUsd": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the usage counter as an estimated cost in USD instead of a raw token count. Uses the same token total, converted with the rate below."
+        },
+        "techwordCode.usdPerMillionTokens": {
+          "type": "number",
+          "default": 1.6111,
+          "minimum": 0,
+          "description": "Price in USD per 1,000,000 tokens, used to show the usage counter in dollars. Default (1.6111) matches the observed rate of about $5.00 per 3,103,392 tokens; change it if your provider's pricing differs."
         },
         "techwordCode.contextMode": {
           "type": "string",

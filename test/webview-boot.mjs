@@ -88,6 +88,22 @@ const seq = [
 for (const m of seq) { fire(m); }
 console.log('MSG_OK: fired ' + seq.length + ' message kinds, no throw');
 
+// Usage counter → USD. Fire known totals through the REAL renderUsage in main.js and assert the shipped
+// output, so this tests the code that ships, not a copy of the formula. Rate 1.6111/M is the observed
+// $5.00 ≈ 3,103,392 tokens. Breaking inputs: the exact cap (must read ~$5.00), a small amount (must NOT
+// round to $0.00), cost switched off (must fall back to tokens), and a zero/absent rate (same fallback).
+function usageText(m) { fire(Object.assign({ kind: 'usage' }, m)); return byId['usage']._text; }
+const cases = [
+  { in: { total: 3103392, usdPerMillion: 1.6111, showCost: true }, want: '$5.00', why: 'the $5 cap reads back as ~$5.00' },
+  { in: { total: 10000, usdPerMillion: 1.6111, showCost: true }, want: '$0.016', why: 'a small spend keeps 3 decimals, not $0.00' },
+  { in: { total: 1000, usdPerMillion: 1.6111, showCost: true }, want: '$0.0016', why: 'a tiny spend keeps 4 decimals, still visible' },
+  { in: { total: 1234, usdPerMillion: 1.6111, showCost: false }, want: '1,234 tokens', why: 'cost OFF falls back to the token count' },
+  { in: { total: 1234, usdPerMillion: 0, showCost: true }, want: '1,234 tokens', why: 'no known rate falls back to the token count' },
+  { in: { total: 0, usdPerMillion: 1.6111, showCost: true }, want: '', why: 'zero usage shows nothing' },
+];
+for (const c of cases) { const got = usageText(c.in); if (got !== c.want) { die('USAGE_FAIL (' + c.why + '): got ' + JSON.stringify(got) + ' want ' + JSON.stringify(c.want)); } }
+console.log('USAGE_OK: cost-in-USD rendering holds for ' + cases.length + ' cases');
+
 // Assert the Brain gate: after this sequence, the panel must hold ONLY the one reasoning row.
 setTimeout(() => {
   const list = byId['transcriptList'];

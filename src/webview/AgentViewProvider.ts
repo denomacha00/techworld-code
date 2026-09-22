@@ -35,7 +35,7 @@ type OutMessage =
   | { kind: 'complete' }
   | { kind: 'approvalRequest'; request: ApprovalRequest; auto: boolean; warning?: string }
   | { kind: 'approvalResolved'; id: string; approved: boolean }
-  | { kind: 'usage'; total: number; window?: number; limit?: number }
+  | { kind: 'usage'; total: number; window?: number; limit?: number; usdPerMillion?: number; showCost?: boolean }
   | { kind: 'connection'; ok: boolean; message: string; latencyMs?: number; models?: string[] }
   | { kind: 'attachments'; items: Array<{ id: string; name: string; kind: 'image' | 'text'; dataUrl?: string }> }
   | { kind: 'history'; items: ConversationMeta[]; currentId?: string }
@@ -114,6 +114,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   private post(message: OutMessage): void { void this.view?.webview.postMessage(message); }
 
+  /** Cost-display settings for the usage counter: whether to show USD and the price per million tokens. */
+  private costConfig(): { showCost: boolean; usdPerMillion: number } {
+    const config = vscode.workspace.getConfiguration('techwordCode');
+    return { showCost: config.get<boolean>('showCostInUsd', true), usdPerMillion: config.get<number>('usdPerMillionTokens', 1.6111) };
+  }
+
   private emit(event: AgentEvent): void {
     switch (event.type) {
       case 'status': this.post({ kind: 'status', message: event.message }); break;
@@ -125,7 +131,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       case 'checkpoint': this.post({ kind: 'checkpoint', id: event.id, summary: event.summary }); this.scheduleSave(); break;
       case 'question': this.post({ kind: 'question', text: event.text, options: event.options }); break;
       case 'preview': this.post({ kind: 'preview', dataUrl: event.dataUrl, name: event.name }); break;
-      case 'usage': this.post({ kind: 'usage', total: event.total, window: event.window, limit: event.limit }); break;
+      case 'usage': { const c = this.costConfig(); this.post({ kind: 'usage', total: event.total, window: event.window, limit: event.limit, usdPerMillion: c.usdPerMillion, showCost: c.showCost }); break; }
       case 'compacted': this.post({ kind: 'compacted', message: event.message }); this.scheduleSave(); break; // context was rewritten — persist so a reload doesn't lose the summary
       case 'queued': this.post({ kind: 'queued', items: event.items }); break;
       case 'thinking': this.post({ kind: 'thinking', text: event.text }); break; // real reasoning → Activity panel
@@ -701,7 +707,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.customTitle = stored.titleCustom ? stored.title : undefined;
     this.pendingAttachments = [];
     this.post({ kind: 'load', title: stored.title, items: this.displayFrom(stored.messages) });
-    this.post({ kind: 'usage', total: stored.totalTokens });
+    { const c = this.costConfig(); this.post({ kind: 'usage', total: stored.totalTokens, usdPerMillion: c.usdPerMillion, showCost: c.showCost }); }
     await this.postState();
   }
 
