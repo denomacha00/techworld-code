@@ -283,12 +283,11 @@
   function logActivity(text, cls) {
     if (!el.transcriptList) { return; }
     if (!text) { return; }
-    // The Brain panel shows ONLY the model's real reasoning — what it's thinking, what it plans, how it
-    // reads the problem — and nothing else. Tool calls (Read · file), results (↳ Read 24 lines), and
-    // status/retry lines (Finding a faster server…) are deliberately dropped here: they're already shown
-    // in chat (tool cards) and on the working bar, and mixing them in buried the one line that mattered.
-    // So only reasoning rows (tagged 'tr-think' by emitThink) render; every other caller is a no-op for
-    // the panel. When there's no reasoning, the panel stays empty — exactly as intended.
+    // The Brain panel shows ONLY the model's real reasoning — what it's thinking, how it reads the
+    // problem — and nothing else. Tool calls, results, and status lines are deliberately dropped here
+    // (they're already in chat as tool cards and on the working bar); mixing them in buries the reasoning.
+    // So only 'tr-think' rows render. Reasoning is OFF by default for speed and turns on when you open
+    // Brain — so while it's off this panel is simply empty until you switch reasoning on.
     if (cls !== 'tr-think') { return; }
     cancelActivityClear(); // fresh activity → the task is alive again, keep the trail
     const row = document.createElement('div');
@@ -438,6 +437,7 @@
     }
     return {
       list_workspace_files: { icon: '📁', verb: 'List' },
+      open_folder: { icon: '📂', verb: 'Open folder' },
       read_file: { icon: '📖', verb: 'Read' },
       get_git_status: { icon: '🔀', verb: 'Git status' },
       get_git_diff: { icon: '🔀', verb: 'Git diff' },
@@ -499,8 +499,10 @@
     det.textContent = detail;
     const spin = document.createElement('span');
     spin.className = 'tool-spin';
-    // File-operating tools: make the path clickable so you can open exactly what it touched.
-    const FILE_TOOLS = { read_file: 1, edit_file: 1, outline_file: 1, preview_in_chat: 1, find_usages: 1 };
+    // File-operating tools: make the path clickable so you can open exactly what it touched. propose_file_edits
+    // passes a bare path when it's a single edit (so the "Edit" card opens it); multi-file edits pass a count
+    // instead — those open from the per-file rows in the review card and the "✓ Applied" checkpoint below.
+    const FILE_TOOLS = { read_file: 1, edit_file: 1, outline_file: 1, preview_in_chat: 1, find_usages: 1, propose_file_edits: 1 };
     if (FILE_TOOLS[name] && detail) {
       const m = /^(.+?):(\d+)\s*$/.exec(detail); // find_usages passes path:line
       const path = (m ? m[1] : detail).trim();
@@ -650,7 +652,7 @@
 
     const head = document.createElement('div');
     head.className = 'ap-head';
-    head.textContent = request.kind === 'edits' ? 'Review file changes' : request.kind === 'mcp' ? 'Review MCP tool call' : 'Review terminal command';
+    head.textContent = request.kind === 'edits' ? 'Review file changes' : request.kind === 'mcp' ? 'Review MCP tool call' : request.kind === 'folder' ? 'Open this folder?' : 'Review terminal command';
     card.append(head);
 
     const body = document.createElement('div');
@@ -673,6 +675,15 @@
         badge.textContent = p.operation;
         const path = document.createElement('span');
         path.textContent = p.renameTo ? p.path + ' → ' + p.renameTo : p.path;
+        // Make the file itself clickable so you can open exactly what changed, straight from the card —
+        // "touch the Edit N file change and it opens in the editor". Delete has nothing to open; a rename
+        // opens the new path. Paths here are known file paths, so spaces (e.g. "Telegram Desktop") are fine.
+        if (p.operation !== 'delete') {
+          const target = p.operation === 'rename' && p.renameTo ? p.renameTo : p.path;
+          path.classList.add('ap-file', 'link');
+          path.title = 'Open ' + target + ' in the editor';
+          path.addEventListener('click', () => vscode.postMessage({ kind: 'openFile', path: target }));
+        }
         fh.append(badge, path);
         block.append(fh);
         if (p.operation !== 'delete' && p.operation !== 'rename') {
@@ -694,6 +705,14 @@
       args.className = 'cmd';
       args.textContent = request.argsJson;
       body.append(server, args);
+    } else if (request.kind === 'folder') {
+      const meta = document.createElement('div');
+      meta.className = 'cmd-meta';
+      meta.textContent = 'Techword will work in this folder — reads, edits, and terminal commands run here (each edit and command still asks first):';
+      const dir = document.createElement('div');
+      dir.className = 'cmd';
+      dir.textContent = request.path;
+      body.append(meta, dir);
     } else {
       const purpose = document.createElement('div');
       purpose.className = 'cmd-meta';
@@ -728,7 +747,7 @@
     actions.className = 'ap-actions';
     const approve = document.createElement('button');
     approve.className = 'approve';
-    approve.textContent = request.kind === 'edits' ? 'Approve changes' : request.kind === 'mcp' ? 'Run tool' : 'Run command';
+    approve.textContent = request.kind === 'edits' ? 'Approve changes' : request.kind === 'mcp' ? 'Run tool' : request.kind === 'folder' ? 'Open folder' : 'Run command';
     const reject = document.createElement('button');
     reject.className = 'secondary';
     reject.textContent = 'Reject';
@@ -911,7 +930,26 @@
     const row = document.createElement('div');
     row.className = 'checkpoint';
     const label = document.createElement('span');
-    label.textContent = '✓ Applied: ' + (summary || 'changes');
+    label.className = 'cp-label';
+    label.append(document.createTextNode('✓ Applied: '));
+    // The summary is the comma-separated list of files that changed. Render each as a clickable chip so
+    // you can open exactly what it touched and see WHY it changed (bug: "Edit 2 files" wasn't touchable).
+    // Anything that isn't path-shaped (e.g. the 'changes' fallback) stays as plain text.
+    const files = String(summary || 'changes').split(',').map((s) => s.trim()).filter(Boolean);
+    files.forEach((f, i) => {
+      if (i > 0) { label.append(document.createTextNode(', ')); }
+      const pathish = !/\s/.test(f) && /[/\\.]/.test(f);
+      if (pathish) {
+        const a = document.createElement('span');
+        a.className = 'cp-file link';
+        a.textContent = f;
+        a.title = 'Open ' + f + ' in the editor';
+        a.addEventListener('click', () => vscode.postMessage({ kind: 'openFile', path: f }));
+        label.append(a);
+      } else {
+        label.append(document.createTextNode(f));
+      }
+    });
     const revert = document.createElement('button');
     revert.className = 'secondary revert';
     revert.textContent = '↶ Revert';
@@ -1176,13 +1214,22 @@
     const answering = waitingForAnswer;
     const busy = state.running && !answering;
     if (!busy) { addUser(text, pendingAtt.filter((a) => a.kind === 'image')); scrollToBottom(); }
-    if (answering) { waitingForAnswer = false; }
+    if (answering) {
+      waitingForAnswer = false;
+      // They typed their own reply instead of picking a preset — lock the option buttons so the panel
+      // stops implying they still must choose one (bug: "I wrote mine but felt stuck on the options").
+      document.querySelectorAll('.q-option').forEach((x) => { x.classList.add('picked'); x.disabled = true; });
+    }
     vscode.postMessage({ kind: 'submit', prompt: text });
     el.prompt.value = '';
     if (!busy) { setBusy(true); rotateThinking(); } // instant, lively feedback so it never looks frozen
   });
   el.prompt.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); el.send.click(); }
+    if (e.key !== 'Enter') { return; }
+    // Ctrl/Cmd+Enter always sends. And when Techword asked a question, a plain Enter sends your typed
+    // answer too — otherwise people who type their own reply feel stuck ("it makes me pick an option").
+    // Shift+Enter is always a newline, so a multi-line answer is still possible.
+    if (e.ctrlKey || e.metaKey || (waitingForAnswer && !e.shiftKey)) { e.preventDefault(); el.send.click(); }
   });
   el.stop.addEventListener('click', () => {
     vscode.postMessage({ kind: 'stop' });
@@ -1216,7 +1263,17 @@
     const show = open === undefined ? el.transcript.classList.contains('hidden') : open;
     if (show) { cancelActivityClear(); } // opened to read it → don't tidy it away underneath them
     el.transcript.classList.toggle('hidden', !show);
-    if (el.transcriptBtn) { el.transcriptBtn.textContent = 'Brain ⋯'; }
+    // Touching Brain switches the model's real reasoning ON so you can watch it think; closing it switches
+    // reasoning back OFF. Reasoning is off by default because it's markedly slower to first token — this is
+    // the one place it turns on, on demand. Brain shows the reasoning ONLY; while it's off the panel is empty.
+    vscode.postMessage({ kind: 'setThinking', on: show });
+    if (el.transcriptBtn) {
+      el.transcriptBtn.textContent = show ? 'Brain ●' : 'Brain ⋯';
+      el.transcriptBtn.classList.toggle('brain-on', show);
+      el.transcriptBtn.title = show
+        ? 'Reasoning on — Techword shows its thinking (a little slower to start). Click to turn off.'
+        : 'Show what Techword is thinking — turns on live reasoning (a little slower to start).';
+    }
     // Hide the blue working-bar while the Activity drawer is open so you never see two stacked
     // "Activity" surfaces — the drawer you opened is the only one on screen. Restored on close
     // (only if it's still meant to be showing — workState tracks whether Techword is busy).

@@ -1,6 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import * as vscode from 'vscode';
 import { type Checkpoint, type CommandProposal, type EditPreview, type FileEdit } from '../types';
 import { contentHash, isSensitivePath, redact } from '../security/Redaction';
@@ -51,6 +53,13 @@ function isBlockedFetchHost(hostname: string): boolean {
 export class WorkspaceToolExecutor {
   private readonly checkpoints = new Map<string, Checkpoint>();
   private excludeGlob: string | undefined;
+  /** A folder the user pointed Techword at with the open_folder tool. When set (and no worktree baseDir),
+   *  it becomes the working root — so "work in C:\\path" operates there even with no folder open in the
+   *  Explorer. All path-containment, protected-file and trust checks still apply, re-anchored to it. */
+  private folderOverride: string | undefined;
+
+  /** The folder set via open_folder (absolute path), if any — so the view can open files against it. */
+  get workingFolder(): string | undefined { return this.folderOverride; }
 
   /** `baseDir`, when set, roots this executor at an isolated git WORKTREE outside the workspace (for a
    *  worker agent), instead of the VS Code workspace folder. In that mode file listing/search go through
@@ -593,10 +602,56 @@ export class WorkspaceToolExecutor {
       if (!vscode.workspace.isTrusted) { throw new Error('Workspace tools are disabled until you trust this workspace.'); }
       return { uri: vscode.Uri.file(this.baseDir), name: 'techword-worktree', index: 0 };
     }
+    // A folder the user pointed Techword at (open_folder) becomes the working root even with no folder in
+    // the Explorer. It's validated once in openFolder(); we re-gate on trust here like every other root.
+    if (this.folderOverride) {
+      if (!vscode.workspace.isTrusted) { throw new Error('Workspace tools are disabled until you trust this window.'); }
+      return { uri: vscode.Uri.file(this.folderOverride), name: 'techword-folder', index: 0 };
+    }
     const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) { throw new Error('Open a trusted workspace folder before using workspace tools.'); }
+    if (!folder) { throw new Error('No folder is open. Point Techword at one by giving it the folder path (e.g. "work in C:\\Users\\me\\project"), and it will open it with the open_folder tool — or open a folder yourself via File → Open Folder and trust it.'); }
     if (!vscode.workspace.isTrusted) { throw new Error('Workspace tools are disabled until you trust this workspace.'); }
     return folder;
+  }
+
+  /** Validate a folder the user named (open_folder tool) WITHOUT committing to it yet — so the session can
+   *  ask the user for approval first. Returns the normalized absolute path; throws if it's missing, not a
+   *  directory, a dangerously-broad root, or the window isn't trusted. */
+  async validateFolder(inputPath: string): Promise<string> {
+    const raw = (inputPath || '').trim().replace(/^["']|["']$/g, '').replace(/[\\/]+$/, '');
+    if (!raw) { throw new Error('Give the folder path to open.'); }
+    if (!path.isAbsolute(raw)) { throw new Error(`"${raw}" is not an absolute path. Pass the full folder path, e.g. C:\\Users\\you\\project or /home/you/project.`); }
+    const abs = path.normalize(raw);
+    let stat: vscode.FileStat;
+    try { stat = await vscode.workspace.fs.stat(vscode.Uri.file(abs)); }
+    catch { throw new Error(`No such folder: ${abs}`); }
+    if (!(stat.type & vscode.FileType.Directory)) { throw new Error(`Not a folder: ${abs} — pass a directory, not a file.`); }
+    if (this.isUnsafeRoot(abs)) { throw new Error(`Refusing to open ${abs}: a whole drive, your home folder, or a system directory is too broad to work in safely. Point Techword at a specific project folder inside it instead.`); }
+    if (!vscode.workspace.isTrusted) { throw new Error('This window is not trusted, so workspace tools are disabled. Trust it first (the banner at the top of the window).'); }
+    return abs;
+  }
+
+  /** Commit the working root to a folder already validated by validateFolder() and approved by the user.
+   *  No more permissive than an opened workspace folder: containment, protected-file filtering, and
+   *  per-command / per-edit approval all still apply — this only moves WHERE they apply. */
+  setWorkingFolder(abs: string): string {
+    this.folderOverride = abs;
+    return `Working folder set to ${abs}. File tools (read/edit/search) and terminal commands now operate here; each edit and command still needs your approval.`;
+  }
+
+  /** Guard against pointing the working root at somewhere far too broad — a drive/UNC root, the home
+   *  folder itself, or an OS/system directory — so a vague path can't turn into "operate on the whole PC". */
+  private isUnsafeRoot(abs: string): boolean {
+    const norm = abs.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (norm === '' || norm === '/') { return true; }                       // filesystem root
+    if (/^[a-zA-Z]:$/.test(norm)) { return true; }                          // drive root C:\ (normalized to "C:")
+    if (/^\/\/[^/]+(\/[^/]+)?$/.test(norm)) { return true; }                // UNC \\server or \\server\share root
+    const home = (os.homedir() || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    if (home && norm.toLowerCase() === home.toLowerCase()) { return true; } // the home folder itself (a subfolder is fine)
+    const lower = norm.toLowerCase();
+    const banned = ['c:/windows', 'c:/program files', 'c:/program files (x86)', 'c:/programdata',
+      '/etc', '/bin', '/sbin', '/usr', '/var', '/boot', '/dev', '/proc', '/sys', '/system', '/library'];
+    return banned.some((b) => lower === b || lower.startsWith(b + '/'));
   }
 
   /** Raw git stdout in the current root (no redaction/truncation), for parsing file lists / grep. */

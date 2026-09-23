@@ -80,6 +80,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   private customTitle: string | undefined;
   private autoApprove: { edits: boolean; commands: boolean };
   private mode: 'plan' | 'act' = 'act';
+  /** Live override for extended thinking, driven by the Brain toggle in the panel. undefined = follow the
+   *  showThinking setting (default off, for speed); true/false = the user turned reasoning on/off this session. */
+  private thinkingOn: boolean | undefined;
   private readonly mcp = new McpHub((message) => this.post({ kind: 'status', message }));
 
   constructor(private readonly context: vscode.ExtensionContext, private readonly providers: ProviderRegistry) {
@@ -193,7 +196,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     }
     this.session.setContext(config.get<ContextMode>('contextMode', 'auto'), config.get<number>('contextTokenLimit', 120000));
     this.session.setMaxSteps(config.get<number>('maxSteps', 100));
-    this.session.setGenerationOptions({ maxTokens: config.get<number>('maxTokens', 8192), temperature: config.get<number>('temperature', 0), thinking: config.get<boolean>('showThinking', false), thinkingBudget: config.get<number>('thinkingBudget', 2048) });
+    this.session.setGenerationOptions({ maxTokens: config.get<number>('maxTokens', 8192), temperature: config.get<number>('temperature', 0), thinking: this.thinkingOn ?? config.get<boolean>('showThinking', false), thinkingBudget: config.get<number>('thinkingBudget', 2048) });
     this.session.setWebFetchEnabled(config.get<boolean>('enableWebFetch', true));
     this.session.setCostOptions(config.get<boolean>('showCostInUsd', true), config.get<boolean>('usageMeterInCents', true));
     this.session.setMode(this.mode);
@@ -214,11 +217,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   /** Open a workspace file in the editor (foreground) when the user clicks a file chip in the chat. */
   private async openFile(path: string, line?: number): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) { this.post({ kind: 'error', message: 'Open a workspace folder first.' }); return; }
+    // Resolve chips against whatever the file tools are actually rooted at: a folder opened via
+    // open_folder wins, otherwise the first workspace folder. Otherwise a chip for a file the agent
+    // edited inside an opened folder would resolve against the wrong root and read as "no longer here".
+    const overrideDir = this.session?.workingFolder;
+    const baseUri = overrideDir ? vscode.Uri.file(overrideDir) : vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!baseUri) { this.post({ kind: 'error', message: 'No folder is open yet — give Techword a folder to work in first.' }); return; }
     const clean = path.replace(/\\/g, '/').replace(/^\/+/, '');
     if (!clean || clean.split('/').includes('..')) { return; }
-    const uri = vscode.Uri.joinPath(folder.uri, clean);
+    const uri = vscode.Uri.joinPath(baseUri, clean);
     // Check the file still exists before opening. A chip can point at a file that was since deleted,
     // moved, or was only ever read from a temp/ref folder — clicking it should say so plainly, not
     // spill a raw ENOENT / "Unable to resolve nonexistent file" error into the chat.
@@ -531,6 +538,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         }
         break;
       case 'retry': await this.retry(); break;
+      case 'setThinking':
+        // The Brain toggle: reasoning is off by default (for speed); turning it on makes the model stream
+        // its thinking so the panel isn't empty. Remembered for the session and applied on the next turn.
+        if (typeof input.on === 'boolean') { this.thinkingOn = input.on; this.session?.setThinking(input.on); }
+        break;
       case 'openFile': if (typeof input.path === 'string') { await this.openFile(input.path, typeof input.line === 'number' ? input.line : undefined); } break;
       case 'openTerminal': await this.openTerminal(); break;
       case 'layout': if (typeof input.action === 'string') { await this.layout(input.action); } break;

@@ -49,7 +49,8 @@ export interface MemorySink {
 
 // remember/forget only touch Techword's own memory file — never user code — so they're allowed in Plan mode too.
 // check_background_command only READS the status/output of an already-running process, so it's read-only too.
-const READONLY_TOOLS = new Set(['list_workspace_files', 'read_file', 'search_workspace', 'get_git_status', 'get_git_diff', 'get_diagnostics', 'find_symbol', 'outline_file', 'find_usages', 'code_map', 'ask_user', 'web_fetch', 'preview_in_chat', 'spawn_explorer', 'remember', 'forget', 'check_background_command']);
+// open_folder only sets WHERE tools operate (and is approval-gated); it changes no files, so Plan mode may use it.
+const READONLY_TOOLS = new Set(['list_workspace_files', 'read_file', 'search_workspace', 'get_git_status', 'get_git_diff', 'get_diagnostics', 'find_symbol', 'outline_file', 'find_usages', 'code_map', 'ask_user', 'web_fetch', 'preview_in_chat', 'spawn_explorer', 'remember', 'forget', 'check_background_command', 'open_folder']);
 
 // Pure, side-effect-free lookups that are safe to run CONCURRENTLY when the model batches several in one
 // turn (Claude Code / Cursor do exactly this — the biggest per-turn latency win after caching). Excluded
@@ -102,6 +103,8 @@ export class AgentSession {
 
   get running(): boolean { return this.abortController !== undefined; }
   get tokens(): number { return this.totalTokens; }
+  /** The folder Techword was pointed at with open_folder (if any), so the view can open files from it. */
+  get workingFolder(): string | undefined { return this.executor.workingFolder; }
 
   /** Update model/provider mid-conversation without losing history. */
   setProvider(provider: ProviderConfig): void { this.provider = provider; }
@@ -145,6 +148,10 @@ export class AgentSession {
   setMode(mode: AgentMode): void { this.mode = mode; }
   setMaxSteps(n: number): void { this.maxSteps = Math.min(2000, Math.max(10, n)); }
   setGenerationOptions(options: GenerationOptions): void { this.genOptions = options; }
+  /** Turn extended thinking (the model's real reasoning stream) on/off mid-session — wired to the Brain
+   *  toggle. Off by default because it's markedly slower to first token; on makes reasoning stream so the
+   *  Brain panel fills. Turning it on also clears any earlier "gateway can't think" flag so we re-probe. */
+  setThinking(on: boolean): void { this.genOptions = { ...this.genOptions, thinking: on }; if (on) { this.thinkingSupported = true; } }
   setWebFetchEnabled(enabled: boolean): void { this.webFetchEnabled = enabled; }
   /** Provide the MCP hub so external-server tools are offered to the model (Act mode only). */
   setMcpHub(hub: McpHub | undefined): void { this.mcp = hub; }
@@ -720,6 +727,15 @@ export class AgentSession {
         case 'list_workspace_files':
           this.emit({ type: 'tool', name: call.name, detail: stringArg(args, 'path', '.') });
           return await this.executor.listFiles(stringArg(args, 'path', '.'), numberArg(args, 'depth', 3));
+        case 'open_folder': {
+          // Validate first (fails fast on a bad/broad path), then ASK the user before switching the working
+          // root. The user explicitly wanted a permission prompt here, so this is never auto-approved.
+          const abs = await this.executor.validateFolder(requiredString(args, 'path'));
+          this.emit({ type: 'tool', name: call.name, detail: abs });
+          const approved = await this.gate({ id: randomUUID(), kind: 'folder', path: abs });
+          if (!approved) { return 'The user declined to open that folder, so the working folder is unchanged.'; }
+          return this.executor.setWorkingFolder(abs);
+        }
         case 'read_file':
           this.emit({ type: 'tool', name: call.name, detail: requiredString(args, 'path') });
           return await this.executor.readFile(requiredString(args, 'path'), numberArg(args, 'startLine', 1), numberArg(args, 'endLine', 400));
@@ -819,7 +835,10 @@ export class AgentSession {
     const previews = await this.executor.buildPreviews(edits);
     const approval = this.approvals.request(edits);
     const id = randomUUID();
-    this.emit({ type: 'tool', name: 'propose_file_edits', detail: `${edits.length} file change(s)` });
+    // Single edit → pass the path so the "Edit" card is clickable and names the file; multiple → a count
+    // (the per-file rows in the review card and the checkpoint below are the clickable targets there).
+    const firstEdit = edits[0];
+    this.emit({ type: 'tool', name: 'propose_file_edits', detail: edits.length === 1 && firstEdit ? firstEdit.path : `${edits.length} file change(s)` });
     const approved = await this.gate({ id, kind: 'edits', summary, previews });
     if (!approved) { this.approvals.reject(approval.id); return 'The user rejected the proposed file changes.'; }
     if (!this.approvals.consume(approval.id, edits)) { return 'The user rejected the proposed file changes.'; }

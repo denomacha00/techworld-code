@@ -51,9 +51,13 @@ function makeEl(tag) {
 }
 
 const byId = {};
+// A DOM text node: appendable, but never an element — it must never match a selector or be traversed by
+// querySelector/querySelectorAll (those guard on the method existing). main.js uses these inside checkpoint
+// and approval rows via document.createTextNode(...).
+function makeTextNode(t) { return { nodeType: 3, _text: String(t), classList: { contains() { return false; } } }; }
 function getEl(id) { if (!byId[id]) { const e = makeEl('div'); e._id = id; byId[id] = e; } return byId[id]; }
 let msgListener = null;
-globalThis.document = { getElementById: getEl, createElement: makeEl, addEventListener() {}, querySelector() { return null; }, querySelectorAll() { return []; }, body: makeEl('body') };
+globalThis.document = { getElementById: getEl, createElement: makeEl, createTextNode: makeTextNode, addEventListener() {}, querySelector() { return null; }, querySelectorAll() { return []; }, body: makeEl('body') };
 globalThis.window = { addEventListener(ev, fn) { if (ev === 'message') { msgListener = fn; } }, removeEventListener() {} };
 globalThis.acquireVsCodeApi = () => ({ postMessage() {}, getState() { return {}; }, setState() {} });
 globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);

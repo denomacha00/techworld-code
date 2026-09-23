@@ -148,7 +148,8 @@ export interface EditPreview {
 export type ApprovalRequest =
   | { id: string; kind: 'edits'; summary: string; previews: EditPreview[] }
   | { id: string; kind: 'command'; command: string; cwd: string; purpose: string }
-  | { id: string; kind: 'mcp'; server: string; tool: string; argsJson: string };
+  | { id: string; kind: 'mcp'; server: string; tool: string; argsJson: string }
+  | { id: string; kind: 'folder'; path: string };
 
 /** The webview's answer to an approval request. */
 export interface ApprovalResponse {
