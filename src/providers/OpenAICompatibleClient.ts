@@ -12,6 +12,12 @@ const MAX_RETRIES = 6;
 // retrying re-rolls the channel and usually lands on an allowed one. This is the budget for that
 // re-roll, kept separate from MAX_RETRIES so a run of bad rolls never eats the network-error budget.
 const CHANNEL_RETRIES = 10;
+// A model can read as "unavailable" for a beat and then come back: the provider sometimes toggles a model
+// off (channel drained, plan-sync lag) and restores it on its own — the user watched a model that WAS on
+// their plan get rejected, then work again moments later. So "model not available" is NOT taken as final on
+// the first hit — it's re-checked this many times (short, growing waits between) before we surface the
+// terminal "pick another model" error. Own budget, like CHANNEL_RETRIES, so it never eats the network one.
+const MODEL_UNAVAIL_RETRIES = 6; // per the user: retry the model at least 5× before declaring it gone
 const STREAM_IDLE_MS = 60000; // if no stream data arrives for this long, surface an error instead of hanging
 // Time-to-first-byte watchdog. This upstream withholds response headers until the model starts generating,
 // and channels are BIMODAL (measured): a healthy channel delivers the first byte in ~4-35s, a dead one
@@ -37,6 +43,14 @@ export class ThinkingUnsupportedError extends Error {
 export function isThinkingRejection(status: number, rawDetail: string): boolean {
   if (status !== 400 && status !== 422) { return false; }
   return /thinking|budget_tokens|extended.?thinking|reasoning|signature/i.test(rawDetail);
+}
+
+/** A "model not available / no channel for it" response. Often TRANSIENT — the provider drops a model for
+ *  a moment (channel drained, plan-sync lag) and restores it — so the request loop re-checks it a few times
+ *  before treating it as final. Kept distinct from isChannelRejection (a 403 the key can re-roll past): this
+ *  is "no channel can serve this model right now", which we wait out briefly rather than instantly re-roll. */
+export function isModelUnavailable(rawDetail: string): boolean {
+  return /no available channel|model_not_found|无可用|not allowed to access model|does not exist or you do not have access/i.test(rawDetail);
 }
 
 /** A prompt-cache breakpoint. Anthropic caches the whole prefix up to a block tagged with this and
@@ -283,6 +297,7 @@ export class OpenAICompatibleClient {
     const RETRY_STATUS = new Set([408, 429, 500, 502, 503, 504, 520, 522, 523, 524]);
     let response: Response | undefined;
     let channelRetries = 0;
+    let modelRetries = 0;
     let ttfbRerolls = 0;
     // One user-abort listener for the whole call. It aborts whichever attempt is in flight (activeController),
     // and — after a successful fetch — the very controller whose body we're streaming, so a user Stop also
@@ -371,6 +386,17 @@ export class OpenAICompatibleClient {
         const label = proxyTimeout ? 'Reconnecting to Techword' : `Provider busy (${response.status})`;
         yield { status: `${label} — retrying (attempt ${this.bumpAttempt()})…` };
         await this.backoff(attempt, signal);
+        continue;
+      }
+      // "Model not available" is often a transient provider flap (a model toggled off for a beat, then
+      // back). Don't take the first one as final: re-check on its own budget with short, growing waits so a
+      // model that was genuinely on the plan isn't abandoned over a momentary blip. Only after
+      // MODEL_UNAVAIL_RETRIES misses do we fall through to httpError() and tell the user to pick another.
+      if (isModelUnavailable(detail) && modelRetries < MODEL_UNAVAIL_RETRIES && !signal?.aborted) {
+        modelRetries += 1;
+        yield { status: `Model didn't answer — retrying (${modelRetries}/${MODEL_UNAVAIL_RETRIES})…` };
+        attempt -= 1; // a provider flap, not a network failure — don't spend the network-error budget
+        await this.sleep(Math.min(1200 * modelRetries, 4000), signal);
         continue;
       }
       throw this.httpError(response.status, detail, response.statusText);
@@ -638,8 +664,9 @@ export class OpenAICompatibleClient {
     if (/not allowed to use channel|无权使用渠道|channel.*not allowed/i.test(body)) {
       return new TechwordApiError('This model kept routing to a server your Techword key isn\'t enabled for. Pick another model in Settings, or ask your provider to enable this one for your key.', true);
     }
-    // Model not available on this plan. TERMINAL.
-    if (/no available channel|model_not_found|无可用|not allowed to access model|does not exist or you do not have access/.test(body)) {
+    // Model not available on this plan — and it survived the transient re-checks in the request loop
+    // (isModelUnavailable / MODEL_UNAVAIL_RETRIES), so it's genuinely gone, not a momentary flap. TERMINAL.
+    if (isModelUnavailable(rawDetail)) {
       return new TechwordApiError('That model is not available on your Techword plan. Pick another model in Settings, or contact your provider to enable it.', true);
     }
     const detail = rawDetail.slice(0, 400).replace(/(Bearer\s+)[^\s]+/gi, '$1[REDACTED]').replace(/(sk-)[a-z0-9]+/gi, '$1[REDACTED]');

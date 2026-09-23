@@ -2,7 +2,7 @@
   "name": "techword-code",
   "displayName": "Techword Code",
   "description": "Techword Code is an approval-first coding agent powered by Techword API.",
-  "version": "1.11.5",
+  "version": "1.11.6",
   "publisher": "techwordcode",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "resources/icon.png",
@@ -127,10 +127,10 @@
         },
         "techwordCode.maxSteps": {
           "type": "number",
-          "default": 100,
-          "minimum": 10,
+          "default": 0,
+          "minimum": 0,
           "maximum": 2000,
-          "description": "Maximum tool steps per task before pausing for a safety check. Raise it for very large, long-running tasks (e.g. overnight builds)."
+          "description": "Hard cap on tool steps per task. 0 (default) means unlimited — Techword keeps working until the task is done or you hit Stop, and never pauses to ask you to say \"continue\". Set a positive number only if you want a fixed ceiling."
         },
         "techwordCode.maxTokens": {
           "type": "number",

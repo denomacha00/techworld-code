@@ -549,6 +549,17 @@ select { max-width: 180px; }
    so the list fills the (now compact) drawer and scrolls its own overflow instead of pushing it taller. */
 .transcript-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 0; }
 .transcript-list .transcript-row:first-child { padding-right: 34px; }
+/* Empty-state hint: shown centered in the drawer when Brain is open but no reasoning has streamed yet, so
+   an empty panel reads as "waiting to think" instead of looking broken. Absolutely positioned so it doesn't
+   fight the flex list; pointer-events off so the ✕ underneath stays clickable through it. */
+.transcript-empty {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  margin: 0; padding: 16px 24px;
+  text-align: center; font-size: 11px; line-height: 1.6;
+  color: var(--vscode-descriptionForeground);
+  pointer-events: none;
+}
 .transcript-row {
   display: flex; gap: 8px;
   padding: 3px 10px;

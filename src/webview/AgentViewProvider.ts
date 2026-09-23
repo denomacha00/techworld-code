@@ -151,12 +151,17 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   }
 
   private requestApproval(request: ApprovalRequest): Promise<boolean> {
-    // Auto-approve applies to edits (Edit mode) and commands/MCP (Bypass mode). But a genuinely
-    // dangerous command (rm -rf, disk format, fork bomb, curl|sh, force push…) is NEVER auto-run — not
-    // even in Bypass. This matches CommandPolicy's contract and stops an injected instruction in the
-    // repo/tool output from silently detonating a destructive command overnight. Such a command still
+    // Auto-approve applies to edits (Edit mode) and commands/MCP (Bypass mode). Pointing Techword at a
+    // folder (open_folder) rides with commands: in Bypass the user has said "just do it", so blocking the
+    // whole turn on a manual folder click there reads as a hang (and strands anything they typed after it in
+    // the queue). It's non-destructive — it only sets WHERE tools operate; every edit/command run there is
+    // still gated exactly as it would be. Manual/Edit still get the folder prompt. `autoApprove.commands` is
+    // true only in Bypass (Edit sets it false), so this scopes the folder auto-approve to Bypass cleanly.
+    // But a genuinely dangerous command (rm -rf, disk format, fork bomb, curl|sh, force push…) is NEVER
+    // auto-run — not even in Bypass. This matches CommandPolicy's contract and stops an injected instruction
+    // in the repo/tool output from silently detonating a destructive command overnight. Such a command still
     // appears in chat with a warning; the human must click. Everything else runs unattended as before.
-    let auto = (request.kind === 'edits' && this.autoApprove.edits) || ((request.kind === 'command' || request.kind === 'mcp') && this.autoApprove.commands);
+    let auto = (request.kind === 'edits' && this.autoApprove.edits) || ((request.kind === 'command' || request.kind === 'mcp' || request.kind === 'folder') && this.autoApprove.commands);
     let warning: string | undefined;
     if (request.kind === 'command') {
       const blocked = vscode.workspace.getConfiguration('techwordCode').get<string[]>('blockedCommands', []);
@@ -195,7 +200,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       this.session.setProvider(provider); this.session.setApiKey(apiKey);
     }
     this.session.setContext(config.get<ContextMode>('contextMode', 'auto'), config.get<number>('contextTokenLimit', 120000));
-    this.session.setMaxSteps(config.get<number>('maxSteps', 100));
+    this.session.setMaxSteps(config.get<number>('maxSteps', 0)); // 0 = unlimited: never halt a productive task with a "say continue" step cap
     this.session.setGenerationOptions({ maxTokens: config.get<number>('maxTokens', 8192), temperature: config.get<number>('temperature', 0), thinking: this.thinkingOn ?? config.get<boolean>('showThinking', false), thinkingBudget: config.get<number>('thinkingBudget', 2048) });
     this.session.setWebFetchEnabled(config.get<boolean>('enableWebFetch', true));
     this.session.setCostOptions(config.get<boolean>('showCostInUsd', true), config.get<boolean>('usageMeterInCents', true));
@@ -878,6 +883,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 <section id="transcript" class="transcript hidden" aria-label="Brain — the model's reasoning">
   <button id="transcriptClose" class="transcript-close" title="Hide Brain" aria-label="Hide Brain">✕</button>
   <div id="transcriptList" class="transcript-list"></div>
+  <p id="transcriptEmpty" class="transcript-empty hidden">Brain is open — everything Techword does streams here as it works: every file it reads, edits, or creates, every command it runs, and its reasoning. Start a task and you'll watch it think and act, step by step.</p>
 </section>
 
 <div id="queued" class="queued-tray"></div>

@@ -50,6 +50,7 @@
     transcript: document.getElementById('transcript'),
     transcriptClose: document.getElementById('transcriptClose'),
     transcriptList: document.getElementById('transcriptList'),
+    transcriptEmpty: document.getElementById('transcriptEmpty'),
     queued: document.getElementById('queued'),
   };
 
@@ -278,17 +279,17 @@
       // Don't yank the log out from under someone who has the drawer open reading it.
       if (el.transcript && !el.transcript.classList.contains('hidden')) { return; }
       if (el.transcriptList) { el.transcriptList.innerHTML = ''; }
+      updateBrainEmpty();
     }, ACTIVITY_CLEAR_MS);
   }
   function logActivity(text, cls) {
     if (!el.transcriptList) { return; }
     if (!text) { return; }
-    // The Brain panel shows ONLY the model's real reasoning — what it's thinking, how it reads the
-    // problem — and nothing else. Tool calls, results, and status lines are deliberately dropped here
-    // (they're already in chat as tool cards and on the working bar); mixing them in buries the reasoning.
-    // So only 'tr-think' rows render. Reasoning is OFF by default for speed and turns on when you open
-    // Brain — so while it's off this panel is simply empty until you switch reasoning on.
-    if (cls !== 'tr-think') { return; }
+    // Brain is a live play-by-play of EVERYTHING Techword does while it works — every file it reads, edits,
+    // or creates, every command it runs and its result, every status — PLUS the model's real reasoning (the
+    // faded 'tr-think' rows) when thinking is on. Each row says WHAT the action is and its target; the
+    // reasoning rows are the why/how. Per the user: with Brain open, no action should be silent, so we no
+    // longer drop the non-reasoning rows here (they still show as tool cards in chat too).
     cancelActivityClear(); // fresh activity → the task is alive again, keep the trail
     const row = document.createElement('div');
     row.className = 'transcript-row' + (cls ? ' ' + cls : '');
@@ -307,6 +308,15 @@
       el.transcriptList.removeChild(el.transcriptList.firstElementChild);
     }
     el.transcriptList.scrollTop = el.transcriptList.scrollHeight;
+    updateBrainEmpty();
+  }
+  // Brain open but nothing has streamed yet → show a hint instead of a blank box (a blank box reads as
+  // broken). Hidden the instant the first row lands; actions fill it the moment Techword does anything.
+  function updateBrainEmpty() {
+    if (!el.transcriptEmpty || !el.transcript) { return; }
+    const open = !el.transcript.classList.contains('hidden');
+    const empty = !el.transcriptList || el.transcriptList.childElementCount === 0;
+    el.transcriptEmpty.classList.toggle('hidden', !(open && empty));
   }
 
   // Drop the terminal output for a Run click under its command block, as faded text (like Claude Code).
@@ -1252,6 +1262,7 @@
     clearStatus();
     setBusy(false);
     if (el.transcriptList) { el.transcriptList.innerHTML = ''; }
+    updateBrainEmpty();
     if (el.queued) { el.queued.innerHTML = ''; }
     queuedCache = [];
     waitingForAnswer = false;
@@ -1279,6 +1290,7 @@
     // (only if it's still meant to be showing — workState tracks whether Techword is busy).
     if (el.workbar) { el.workbar.classList.toggle('workbar-behind-drawer', show); }
     if (show && el.transcriptList) { el.transcriptList.scrollTop = el.transcriptList.scrollHeight; }
+    updateBrainEmpty(); // opening with nothing yet → show the hint; closing → hide it
   }
   if (el.transcriptBtn) { el.transcriptBtn.addEventListener('click', () => toggleTranscript()); }
   if (el.transcriptClose) { el.transcriptClose.addEventListener('click', () => toggleTranscript(false)); }

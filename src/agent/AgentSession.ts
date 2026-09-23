@@ -76,7 +76,11 @@ export class AgentSession {
   private contextLimit = 120000;
   private queued: PendingQueuedItem[] = [];
   private mode: AgentMode = 'act';
-  private maxSteps = 100;
+  // 0 = unlimited (the default): Techword keeps working until the task is genuinely done or the user hits
+  // Stop — it never pauses to ask you to say "continue". A POSITIVE value is an opt-in hard ceiling (the
+  // stress harnesses set one so their runs terminate). The real runaway guards are the empty/stall detectors
+  // below, not this counter.
+  private maxSteps = 0;
   private genOptions: GenerationOptions = {};
   // Whether this gateway can do extended thinking. Flips to false on the first rejection and stays
   // there for the session, so we don't re-probe a gateway we already know can't do it.
@@ -146,7 +150,7 @@ export class AgentSession {
   }
   setContext(mode: ContextMode, limit: number): void { this.contextMode = mode; this.contextLimit = Math.max(8000, limit); }
   setMode(mode: AgentMode): void { this.mode = mode; }
-  setMaxSteps(n: number): void { this.maxSteps = Math.min(2000, Math.max(10, n)); }
+  setMaxSteps(n: number): void { this.maxSteps = n > 0 ? Math.min(2000, Math.max(1, n)) : 0; } // 0 / negative = unlimited; a positive value clamps to [1, 2000] as an opt-in cap
   setGenerationOptions(options: GenerationOptions): void { this.genOptions = options; }
   /** Turn extended thinking (the model's real reasoning stream) on/off mid-session — wired to the Brain
    *  toggle. Off by default because it's markedly slower to first token; on makes reasoning stream so the
@@ -237,7 +241,9 @@ export class AgentSession {
     const finish = guard.finish;
     try {
       const client = new OpenAICompatibleClient(this.provider, this.apiKey, { ...this.genOptions, thinking: this.genOptions.thinking === true && this.thinkingSupported });
-      for (let turn = 0; turn < this.maxSteps; turn += 1) {
+      // Unbounded by default (maxSteps === 0). Genuine progress every turn means it keeps coding; a run that
+      // stops making progress is ended by the empty/stall guards inside, not by an arbitrary step ceiling.
+      for (let turn = 0; this.maxSteps === 0 || turn < this.maxSteps; turn += 1) {
         this.drainQueue();
         if (!await this.manageContext(client)) { return; }
         this.emit({ type: 'status', message: 'Working…' });
@@ -335,7 +341,13 @@ export class AgentSession {
           }
         }
       }
-      throw new Error(`The agent reached its ${this.maxSteps}-step safety limit. Say "continue" to keep going, or raise techwordCode.maxSteps for very large tasks.`);
+      // Only reachable when a POSITIVE techwordCode.maxSteps cap is set (default 0 loops above until the task
+      // genuinely finishes or the user hits Stop). Hitting an opt-in cap is not an error and must never nag —
+      // wrap up cleanly. The genuine no-progress guards (decideAfterEmptyTurn / EMPTY_RESPONSE_LIMIT above)
+      // already end a stuck run on their own, so nothing here is load-bearing for runaway protection.
+      this.emit({ type: 'assistantDelta', text: `Reached the ${this.maxSteps}-step cap set in techwordCode.maxSteps. Say "continue" to keep going, or set it to 0 for unlimited.` });
+      finish();
+      return;
     } catch (error) {
       if (!this.abortController.signal.aborted) { guard.markSpent(); this.emit({ type: 'error', message: error instanceof Error ? error.message : String(error) }); }
     } finally {
@@ -728,8 +740,9 @@ export class AgentSession {
           this.emit({ type: 'tool', name: call.name, detail: stringArg(args, 'path', '.') });
           return await this.executor.listFiles(stringArg(args, 'path', '.'), numberArg(args, 'depth', 3));
         case 'open_folder': {
-          // Validate first (fails fast on a bad/broad path), then ASK the user before switching the working
-          // root. The user explicitly wanted a permission prompt here, so this is never auto-approved.
+          // Validate first (fails fast on a bad/broad path), then ASK before switching the working root —
+          // EXCEPT in Bypass mode, where requestApproval auto-approves it (the user opted into unattended
+          // runs, and a manual folder click there just hangs the turn). Manual/Edit still get the prompt.
           const abs = await this.executor.validateFolder(requiredString(args, 'path'));
           this.emit({ type: 'tool', name: call.name, detail: abs });
           const approved = await this.gate({ id: randomUUID(), kind: 'folder', path: abs });

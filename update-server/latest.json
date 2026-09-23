@@ -1,6 +1,6 @@
 {
-  "version": "1.11.5",
-  "vsixUrl": "/releases/techword-code-1.11.5.vsix",
-  "notes": "Clickable files: open any changed file from the Edit card, the review rows, or the Applied checkpoint. Brain now shows the model's reasoning on demand. Techword can open a folder you name and work in it (edits + terminal) after you approve. And you can type your own answer to a question instead of being forced to pick an option.",
-  "sha256": "04cc85827b1e49cd3d5e35f2520eda4c877b2c229eef9b18237ddf0b66dc5d5a"
+  "version": "1.11.6",
+  "vsixUrl": "/releases/techword-code-1.11.6.vsix",
+  "notes": "Unlimited steps by default (no more 100-step 'say continue' halt); model-unavailable now retries up to 6x before failing; open_folder works in Bypass mode; Brain panel shows the full play-by-play.",
+  "sha256": "1960f0917ccfd8f6914750ec26a2e990d32caf2b8426e5d4cf1a48088ac57f68"
 }
