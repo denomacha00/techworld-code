@@ -883,7 +883,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 <section id="transcript" class="transcript hidden" aria-label="Brain — the model's reasoning">
   <button id="transcriptClose" class="transcript-close" title="Hide Brain" aria-label="Hide Brain">✕</button>
   <div id="transcriptList" class="transcript-list"></div>
-  <p id="transcriptEmpty" class="transcript-empty hidden">Brain is open — everything Techword does streams here as it works: every file it reads, edits, or creates, every command it runs, and its reasoning. Start a task and you'll watch it think and act, step by step.</p>
+  <p id="transcriptEmpty" class="transcript-empty hidden">Brain is open — Techword's live reasoning streams here as it works: what it's thinking, what it decides, and why. The files it reads and edits and the commands it runs stay in the chat; this panel is just the thinking. If it stays empty, the model didn't return reasoning for this step.</p>
 </section>
 
 <div id="queued" class="queued-tray"></div>

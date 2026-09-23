@@ -129,21 +129,23 @@ if (perChatAfter !== '3,103,392 tokens this chat') { die('SPLIT_FAIL (usage must
 if (byId['keyTotal']._text !== '$1.00 / $1.00') { die('SPLIT_FAIL (a usage event must NOT overwrite the header key total): got ' + JSON.stringify(byId['keyTotal']._text)); }
 console.log('BILLING_OK: header key-total + independence from the per-chat counter holds for ' + (bcases.length + 1) + ' cases');
 
-// Brain now surfaces EVERYTHING Techword does, not only reasoning: after the sequence above (a reasoning
-// row, a read_file tool + its result, a checkpoint, an error, complete…) the panel must hold the ACTION
-// rows too. This is the inverse of the old reasoning-only gate — per the user, with Brain open no action
-// should be silent, so we assert the actions DO appear alongside the reasoning.
+// Brain is reasoning-ONLY. After the sequence above (a 'thinking' row PLUS a status, a read_file tool + its
+// result, a checkpoint, a user_message, an error, complete…) the panel must hold ONLY the reasoning row and
+// NONE of the action/status/error rows. Per the user, Brain shows "the thinkings and decisions, not the
+// files it's editing" — so a tool card ("Read · README.md"), "↳ Read 24 lines", "✓ Applied", a retry
+// status, "You added", or "Done." must NEVER appear here (they live in the chat). This is the regression
+// guard that stops the gate from being re-widened to a full play-by-play.
 setTimeout(() => {
   const list = byId['transcriptList'];
   const rows = list ? list._children : [];
   const texts = rows.map((r) => { const tx = r.querySelector('.tr-text'); return tx ? tx._text : ''; });
   const has = (cls) => rows.some((r) => r.classList.contains(cls));
   console.log('BRAIN_ROWS=' + JSON.stringify(texts));
-  if (rows.length < 2) { die('BRAIN_SILENT — Brain must show the actions Techword took, got ' + rows.length + ' row(s)'); }
-  if (!has('tr-think')) { die('BRAIN_NO_REASONING — the model reasoning row must still appear'); }
-  if (!has('tr-tool')) { die('BRAIN_NO_ACTION — tool actions (read/edit/run…) must surface in Brain now'); }
-  if (!texts.some((t) => /README\.md/.test(t))) { die('BRAIN_NO_TARGET — an action row must name what it touched (README.md)'); }
+  if (!has('tr-think')) { die('BRAIN_NO_REASONING — the model reasoning row must appear'); }
+  if (rows.some((r) => !r.classList.contains('tr-think'))) { die('BRAIN_NOT_REASONING_ONLY — only reasoning rows may appear, found a non-tr-think row'); }
+  if (texts.some((t) => /README\.md|↳|✓ Applied|Done\.|faster server|You added/.test(t))) { die('BRAIN_LEAKED_ACTION — an action/status/error row leaked into Brain: ' + JSON.stringify(texts)); }
+  if (!texts.some((t) => /portfolio website/.test(t))) { die('BRAIN_MISSING_THOUGHT — the reasoning sentence must be present'); }
   const btn = byId['transcriptBtn'];
   console.log('BRAIN_LABEL=' + JSON.stringify(btn ? btn._text : null));
-  console.log('ALL_CLEAR: booted, fired every message kind, Brain shows the full play-by-play');
+  console.log('ALL_CLEAR: booted, fired every message kind, Brain shows reasoning only');
 }, 40);

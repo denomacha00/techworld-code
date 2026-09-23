@@ -1,6 +1,6 @@
 {
-  "version": "1.11.6",
-  "vsixUrl": "/releases/techword-code-1.11.6.vsix",
-  "notes": "Unlimited steps by default (no more 100-step 'say continue' halt); model-unavailable now retries up to 6x before failing; open_folder works in Bypass mode; Brain panel shows the full play-by-play.",
-  "sha256": "1960f0917ccfd8f6914750ec26a2e990d32caf2b8426e5d4cf1a48088ac57f68"
+  "version": "1.11.7",
+  "vsixUrl": "/releases/techword-code-1.11.7.vsix",
+  "notes": "Brain now shows the model's reasoning and decisions only — the files it reads/edits and the commands it runs stay in the chat, not in Brain.",
+  "sha256": "46ccfc7f04d7a0197f5f606d6061e5c634bed4ae1fa07eeb556f6cc67d62525f"
 }

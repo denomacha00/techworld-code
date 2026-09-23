@@ -285,12 +285,13 @@
   function logActivity(text, cls) {
     if (!el.transcriptList) { return; }
     if (!text) { return; }
-    // Brain is a live play-by-play of EVERYTHING Techword does while it works — every file it reads, edits,
-    // or creates, every command it runs and its result, every status — PLUS the model's real reasoning (the
-    // faded 'tr-think' rows) when thinking is on. Each row says WHAT the action is and its target; the
-    // reasoning rows are the why/how. Per the user: with Brain open, no action should be silent, so we no
-    // longer drop the non-reasoning rows here (they still show as tool cards in chat too).
-    cancelActivityClear(); // fresh activity → the task is alive again, keep the trail
+    cancelActivityClear(); // any activity keeps the task "alive" so the reasoning trail doesn't expire
+    // Brain is Techword's MIND, not its hands. It shows ONLY the model's real reasoning and decisions —
+    // the 'tr-think' rows: "let me check…", "this one failed, I'll try…", "I'll reuse X instead". The files
+    // it reads/edits and the commands it runs (the HANDS) already appear as tool cards in the chat; the user
+    // asked for those to stay OUT of Brain, where they read as noise, not thinking. So every non-reasoning
+    // caller below is a deliberate no-op here — the reasoning stream is the only thing that lands in the panel.
+    if (cls !== 'tr-think') { return; }
     const row = document.createElement('div');
     row.className = 'transcript-row' + (cls ? ' ' + cls : '');
     row.dataset.ts = String(Date.now());
