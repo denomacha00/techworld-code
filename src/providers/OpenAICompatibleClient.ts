@@ -126,27 +126,24 @@ export function thinkingParams(input: {
   return out;
 }
 
-/** Should this attempt cap the time-to-first-byte and re-roll a stuck channel? Only gated on thinking:
- *  with extended thinking ON a long first byte is EXPECTED (the model is reasoning), so never cut it.
- *  With thinking OFF we ALWAYS cap — a stuck channel never recovers by waiting, so every attempt gets a
- *  deadline and re-rolls onto a fresh channel. The number of re-rolls is bounded separately (see the loop),
- *  not by turning the cap off — turning it off is what let a dead channel hang 120s and storm retries. */
-export function shouldCapFirstByte(thinkingEnabled: boolean): boolean {
-  return !thinkingEnabled;
-}
-
-/** How long to wait for the first byte before re-rolling, in ms — PROGRESSIVE, not flat, and the first
- *  probe is deliberately GENEROUS. The first probe (ttfbRerolls === 0) is almost always a real cold start:
- *  the first request of a run, or the first after the 5-minute prompt-cache TTL lapses, must reprocess the
- *  whole system+tools+history from scratch, which legitimately takes 20-35s to first byte. A short cap there
- *  turns one honest wait into the "Finding a faster server" retry storm. So the first probe waits 45s (long
- *  enough that a cold-but-healthy channel delivers even on a full 120k-token context, short enough to still
- *  escape a genuinely dead channel before the proxy's ~100-126s 500/524). Once the first channel has proven
- *  stuck, re-rolls hunt a healthy channel at 20s each — healthy channels answer in ~4-35s (measured), so 20s
- *  catches the fast ones fast while still giving a cold re-roll room to prefill. Worst-case wait before we
- *  give up cleanly: 45 + 5×20 = 145s, all in capped chunks that each escape a dead channel (never one 120s
- *  hang), ending in a clear "servers busy" error rather than a silent stall. */
-export function firstByteCapMs(ttfbRerolls: number): number {
+/** How long to wait for the first byte before re-rolling a stuck channel, in ms — PROGRESSIVE, not flat,
+ *  and ALWAYS armed (thinking on OR off). A stuck channel never recovers by waiting, so every attempt gets a
+ *  finite deadline and re-rolls onto a fresh channel; leaving Brain-on runs uncapped is exactly what let a
+ *  dead channel hang to the proxy's ~120s timeout and storm retries (what the user saw as "stacking"). The
+ *  re-roll COUNT is bounded separately (MAX_TTFB_REROLLS), not by removing the cap.
+ *
+ *  Thinking OFF: the first probe (ttfbRerolls === 0) is almost always a real cold start — the first request
+ *  of a run, or the first after the 5-minute prompt-cache TTL lapses, reprocesses the whole system+tools+
+ *  history from scratch, which legitimately takes 20-35s to first byte. So it waits 45s (long enough that a
+ *  cold-but-healthy channel delivers even on a full 120k context, short enough to still escape a dead channel
+ *  before the proxy's ~100-126s 500/524). Once a channel has proven stuck, re-rolls hunt at 20s each — healthy
+ *  channels answer in ~4-35s (measured). Worst case: 45 + 5×20 = 145s in capped chunks, then a clean "busy".
+ *
+ *  Thinking ON: a long first byte is EXPECTED (the model reasons before it emits), so the deadline is far
+ *  more generous — but still FINITE and below the proxy timeout, so a genuinely dead channel with Brain on
+ *  re-rolls instead of hanging. First probe 90s, re-rolls 60s (both < 120s; worst case 90 + 5×60 = 390s). */
+export function firstByteCapMs(ttfbRerolls: number, thinkingEnabled: boolean): number {
+  if (thinkingEnabled) { return ttfbRerolls === 0 ? 90000 : 60000; }
   return ttfbRerolls === 0 ? 45000 : 20000;
 }
 
@@ -211,6 +208,10 @@ export class OpenAICompatibleClient {
 
   /** Turn extended thinking off for this client after a gateway rejection. */
   disableThinking(): void { this.thinkingOn = false; }
+  /** Flip extended thinking on/off mid-life — wired to the Brain toggle via AgentSession.activeClient so a
+   *  run already streaming starts (or stops) emitting reasoning on its NEXT turn without a client rebuild.
+   *  streamCompletion reads this.thinkingOn fresh each call, so the change lands on the following turn. */
+  setThinking(on: boolean): void { this.thinkingOn = on; }
   get thinkingEnabled(): boolean { return this.thinkingOn; }
 
   /** Next retry number in the continuous sequence (for the "retrying (attempt N)…" status). */
@@ -270,8 +271,9 @@ export class OpenAICompatibleClient {
     const { system, msgs } = this.toAnthropic(messages);
     const maxTokens = this.options.maxTokens && this.options.maxTokens > 0 ? this.options.maxTokens : MAX_TOKENS;
     const hasTools = Array.isArray(tools) && tools.length > 0;
-    // Extended thinking stays on the enabled path for the whole call (the session recreates the client to
-    // turn it off), so thinkOn — which only gates the first-byte cap — is safe to compute once.
+    // thinkOn selects the first-byte cap VALUE (longer when reasoning is on). Computed once per call = per
+    // turn; the Brain toggle mutates this.thinkingOn live (setThinking), so a mid-run flip lands on the NEXT
+    // turn's streamCompletion — no client rebuild needed.
     const thinkOn = thinkingParams({ thinkingOn: this.thinkingOn, maxTokens, sendDisabledThinking: this.sendDisabledThinking, thinkingBudget: this.options.thinkingBudget, temperature: this.options.temperature }).thinking?.type === 'enabled';
     // Rebuildable so the graceful-degrade paths below (thinking rejected, cache_control rejected) can
     // reconstruct the exact request after flipping a flag, instead of hand-patching the body object.
@@ -311,10 +313,12 @@ export class OpenAICompatibleClient {
     for (let attempt = 0; ; attempt += 1) {
       if (signal?.aborted) { throw new Error('Stopped.'); }
       activeController = new AbortController();
-      const capFirstByte = shouldCapFirstByte(thinkOn);
       let ttfbFired = false;
       let ttfbTimer: ReturnType<typeof setTimeout> | undefined;
-      if (capFirstByte) { const c = activeController; ttfbTimer = setTimeout(() => { ttfbFired = true; c.abort(); }, firstByteCapMs(ttfbRerolls)); }
+      // ALWAYS arm a first-byte deadline (thinking on OR off) — a stuck channel never recovers by waiting,
+      // and leaving Brain-on runs uncapped is what let a dead channel hang to the proxy's ~120s timeout and
+      // storm retries. The cap VALUE is longer when thinking is on (the model legitimately reasons first).
+      { const c = activeController; ttfbTimer = setTimeout(() => { ttfbFired = true; c.abort(); }, firstByteCapMs(ttfbRerolls, thinkOn)); }
       try {
         // Accept: text/event-stream tells the gateway (and every proxy hop) this is an SSE request, so
         // it flushes each event as it arrives instead of buffering the whole reply — the same header the
@@ -604,8 +608,12 @@ export class OpenAICompatibleClient {
 
   private sleep(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+      if (signal?.aborted) { resolve(); return; }
+      // Remove the abort listener when the timer wins too — { once } only auto-removes it when it FIRES,
+      // so without this the listeners pile up on the shared signal across many backoffs in one run.
+      const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+      const onAbort = (): void => { clearTimeout(timer); resolve(); };
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 

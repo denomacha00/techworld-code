@@ -85,6 +85,10 @@ export class AgentSession {
   // Whether this gateway can do extended thinking. Flips to false on the first rejection and stays
   // there for the session, so we don't re-probe a gateway we already know can't do it.
   private thinkingSupported = true;
+  // The client the running loop is streaming on, so a mid-run Brain toggle (setThinking) reaches it and
+  // takes effect on the NEXT turn without a rebuild — otherwise turning Brain on mid-run never streams any
+  // reasoning and the panel stays empty. undefined whenever no loop is active.
+  private activeClient: OpenAICompatibleClient | undefined;
   private webFetchEnabled = true;
   private questionResolver: ((answer: string) => void) | undefined;
   private mcp: McpHub | undefined;
@@ -155,7 +159,13 @@ export class AgentSession {
   /** Turn extended thinking (the model's real reasoning stream) on/off mid-session — wired to the Brain
    *  toggle. Off by default because it's markedly slower to first token; on makes reasoning stream so the
    *  Brain panel fills. Turning it on also clears any earlier "gateway can't think" flag so we re-probe. */
-  setThinking(on: boolean): void { this.genOptions = { ...this.genOptions, thinking: on }; if (on) { this.thinkingSupported = true; } }
+  setThinking(on: boolean): void {
+    this.genOptions = { ...this.genOptions, thinking: on };
+    if (on) { this.thinkingSupported = true; }
+    // Reach the client the running loop is streaming on so the toggle lands on its next turn. streamCompletion
+    // reads the flag fresh each turn, so no rebuild is needed — this is what makes Brain fill mid-run.
+    this.activeClient?.setThinking(on);
+  }
   setWebFetchEnabled(enabled: boolean): void { this.webFetchEnabled = enabled; }
   /** Provide the MCP hub so external-server tools are offered to the model (Act mode only). */
   setMcpHub(hub: McpHub | undefined): void { this.mcp = hub; }
@@ -241,11 +251,12 @@ export class AgentSession {
     const finish = guard.finish;
     try {
       const client = new OpenAICompatibleClient(this.provider, this.apiKey, { ...this.genOptions, thinking: this.genOptions.thinking === true && this.thinkingSupported });
+      this.activeClient = client; // expose it so a mid-run Brain toggle can reach this exact client
       // Unbounded by default (maxSteps === 0). Genuine progress every turn means it keeps coding; a run that
       // stops making progress is ended by the empty/stall guards inside, not by an arbitrary step ceiling.
       for (let turn = 0; this.maxSteps === 0 || turn < this.maxSteps; turn += 1) {
         this.drainQueue();
-        if (!await this.manageContext(client)) { return; }
+        if (!await this.manageContext()) { return; }
         this.emit({ type: 'status', message: 'Working…' });
         const turn_ = await this.streamTurn(client);
         if (!turn_) { return; } // user stopped
@@ -358,6 +369,7 @@ export class AgentSession {
       // it and tell the UI, or a queued chip lingers forever pointing at a task that no longer exists.
       if (this.queued.length > 0) { this.queued = []; this.emitQueued(); }
       this.abortController = undefined;
+      this.activeClient = undefined;
     }
   }
 
@@ -452,14 +464,14 @@ export class AgentSession {
   dispose(): void { this.executor.disposeBackground(); }
 
   /** Keep the conversation within the context window. Returns false if the user chose to stop. */
-  private async manageContext(client: OpenAICompatibleClient): Promise<boolean> {
+  private async manageContext(): Promise<boolean> {
     const estimate = this.lastTurnTokens || this.estimateTokens();
     if (estimate < this.contextLimit) { return true; }
     if (this.contextMode === 'ask') {
       const proceed = await this.gate({ id: randomUUID(), kind: 'command', command: 'Compact conversation and continue', cwd: `~${Math.round(estimate / 1000)}K tokens used of ${Math.round(this.contextLimit / 1000)}K`, purpose: 'The context window is nearly full. Approve to summarize earlier work and keep going without losing memory.' });
       if (!proceed) { this.emit({ type: 'status', message: 'Paused. Your chat is saved — reopen it any time to continue.' }); return false; }
     }
-    await this.compact(client);
+    await this.compact();
     return true;
   }
 
@@ -467,7 +479,7 @@ export class AgentSession {
    *  The kept tail is cut at a real user-turn boundary and the summary is folded INTO that leading user
    *  message — so the compacted history still starts with a user turn and never orphans a tool_result
    *  (both of which the Anthropic Messages API rejects, which used to fail the very next request). */
-  private async compact(client: OpenAICompatibleClient): Promise<void> {
+  private async compact(): Promise<void> {
     const system = this.messages[0];
     if (!system) { return; }
     const cut = chooseCompactionCut(this.messages.map((message) => message.role), 4);
@@ -480,9 +492,13 @@ export class AgentSession {
       ...older,
       { role: 'user', content: 'Summarize everything above so work can continue in a fresh context: the goal, key decisions, files created/modified, commands run and their outcomes, and what still needs doing. Preserve every fact needed to continue. Do not omit file paths.' }
     ];
+    // Summarize on a DEDICATED thinking-OFF client, never the loop's (which may have Brain on). With thinking
+    // off the first-byte cap always arms, so a stuck channel can't hang compaction to the proxy timeout — the
+    // "text compact is stacking" bug. A fast, cheap summary is exactly what this step wants anyway.
+    const summarizer = new OpenAICompatibleClient(this.provider, this.apiKey, { ...this.genOptions, thinking: false });
     let summary = '';
     try {
-      for await (const delta of client.streamCompletion(summaryRequest, [], this.abortController?.signal)) {
+      for await (const delta of summarizer.streamCompletion(summaryRequest, [], this.abortController?.signal)) {
         if (delta.text) { summary += delta.text; }
       }
     } catch { return; /* if summarization fails, keep full history rather than lose it */ }
@@ -709,6 +725,7 @@ export class AgentSession {
       if (calls.length === 0) { break; }
       sub.push({ role: 'assistant', content: text, tool_calls: calls.map((call) => ({ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } })) });
       for (const call of calls) {
+        if (this.abortController?.signal.aborted) { break; } // Stop mid-batch: don't run more tools, and never park a fresh approval the cleared stop() can't resolve
         this.emit({ type: 'tool', name: call.name, detail: `${tag}agent: ${JSON.stringify(call.arguments).slice(0, 80)}` });
         const result = await this.executeTool(call);
         this.emit({ type: 'toolResult', summary: summarizeResult(call.name, result) });

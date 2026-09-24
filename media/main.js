@@ -655,6 +655,10 @@
   }
 
   function addApproval(request, auto, warning) {
+    // A re-post (panel reload → getState → repostPending) must reuse the existing card, not stack a
+    // second copy under the first. The host's repost is documented as idempotent — this is what makes
+    // it so. Dedupe by the request id.
+    if (request && request.id && el.log.querySelector('.approval[data-id="' + request.id + '"]')) { return; }
     endAssistant();
     clearStatus();
     const card = document.createElement('div');
@@ -787,18 +791,26 @@
   function addNote(text) {
     endAssistant();
     clearStatus();
+    // Collapse a repeat of the same note (e.g. back-to-back compaction notices) instead of stacking
+    // identical lines — that pile-up is the "stacking" seen around compaction.
+    const last = el.log.lastElementChild;
+    if (last && last.classList.contains('note-line') && last.textContent === text) { return; }
     const d = document.createElement('div');
     d.className = 'note-line';
     d.textContent = text;
     add(d);
   }
 
-  function addQuestion(text, options) {
+  function addQuestion(id, text, options) {
+    // Dedupe like approvals: a re-post on panel reload (repostPending) must not stack a second copy of
+    // the same question. If the card is already showing, just refocus the box.
+    if (id && el.log.querySelector('.question-line[data-id="' + id + '"]')) { el.prompt.focus(); return; }
     endAssistant();
     clearStatus();
     logActivity('Asked: ' + text);
     const d = document.createElement('div');
     d.className = 'question-line';
+    if (id) { d.dataset.id = id; }
     const q = document.createElement('div');
     q.innerHTML = renderMarkdown(text);
     d.append(q);
@@ -1224,7 +1236,19 @@
     // posts a 'queued' update that renders the chip; we just clear the box.
     const answering = waitingForAnswer;
     const busy = state.running && !answering;
-    if (!busy) { addUser(text, pendingAtt.filter((a) => a.kind === 'image')); scrollToBottom(); }
+    if (!busy) {
+      addUser(text, pendingAtt.filter((a) => a.kind === 'image'));
+      scrollToBottom();
+      // A genuinely fresh turn (not answering a mid-task question) starts a new task, so clear the
+      // previous turn's reasoning trail — otherwise Brain piles this turn's thinking on top of the last
+      // turn's, which is the "stacking" in the panel. Answering a question keeps the trail (same task).
+      if (!answering) {
+        cancelActivityClear();
+        if (el.transcriptList) { el.transcriptList.innerHTML = ''; }
+        resetThinking();
+        updateBrainEmpty();
+      }
+    }
     if (answering) {
       waitingForAnswer = false;
       // They typed their own reply instead of picking a preset — lock the option buttons so the panel
@@ -1263,6 +1287,7 @@
     clearStatus();
     setBusy(false);
     if (el.transcriptList) { el.transcriptList.innerHTML = ''; }
+    resetThinking();
     updateBrainEmpty();
     if (el.queued) { el.queued.innerHTML = ''; }
     queuedCache = [];
@@ -1423,7 +1448,7 @@
       case 'commandOutput': addCommandOutput(m.chunk); break;
       case 'toolResult': addToolResult(m.summary); break;
       case 'checkpoint': addCheckpoint(m.id, m.summary); logActivity('✓ Applied: ' + (m.summary || 'changes'), 'tr-done'); break;
-      case 'question': waitingForAnswer = true; addQuestion(m.text, m.options); break;
+      case 'question': waitingForAnswer = true; addQuestion(m.id, m.text, m.options); break;
       case 'queued': renderQueued(m.items); break;
       case 'preview': addPreview(m.dataUrl, m.name); break;
       case 'error': waitingForAnswer = false; setBusy(false); renderQueued([]); addError(m.message); logActivity(m.message, 'tr-error'); armActivityClear(); break;

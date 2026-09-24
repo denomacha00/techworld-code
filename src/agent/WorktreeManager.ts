@@ -68,9 +68,14 @@ export class WorktreeManager {
     return new Promise((resolve, reject) => {
       const child = spawn('git', ['apply', '--whitespace=nowarn'], { cwd: dir, windowsHide: true });
       let err = '';
+      let done = false;
+      // Guard against a hung git process wedging worktree creation forever: kill + reject on timeout,
+      // and make resolve/reject fire exactly once (a kill fires 'close' too).
+      const settle = (fn: () => void) => { if (done) { return; } done = true; clearTimeout(timer); fn(); };
+      const timer = setTimeout(() => { try { child.kill(); } catch { /* already gone */ } settle(() => reject(new Error('git apply timed out'))); }, GIT_TIMEOUT);
       child.stderr.on('data', (d) => { err += d.toString(); });
-      child.on('error', reject);
-      child.on('close', (code) => code === 0 ? resolve() : reject(new Error(err || `git apply exited ${code}`)));
+      child.on('error', (e) => settle(() => reject(e)));
+      child.on('close', (code) => settle(() => code === 0 ? resolve() : reject(new Error(err || `git apply exited ${code}`))));
       child.stdin.end(diff);
     });
   }
@@ -127,8 +132,13 @@ export function parseNameStatusZ(z: string): Array<{ status: 'A' | 'M' | 'D' | '
     const code = (tokens[i] ?? '').trim();
     const letter = code[0];
     if (letter === 'R' || letter === 'C') {
-      // R<score>\0<old>\0<new> — the destination is what now exists in the worktree.
+      // R<score>\0<old>\0<new> / C<score>\0<src>\0<dst> — the destination is what now exists.
+      const oldPath = tokens[i + 1];
       const newPath = tokens[i + 2];
+      // A RENAME also removes the old path: emit a deletion so integrating the worker's change back
+      // doesn't leave the pre-rename file orphaned in the workspace. A COPY leaves its source intact,
+      // so only the destination is reported for 'C'.
+      if (letter === 'R' && oldPath) { out.push({ status: 'D', path: oldPath.replace(/\\/g, '/') }); }
       if (newPath) { out.push({ status: 'R', path: newPath.replace(/\\/g, '/') }); }
       i += 3;
     } else if (letter === 'A' || letter === 'M' || letter === 'D') {

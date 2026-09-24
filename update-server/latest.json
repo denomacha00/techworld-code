@@ -1,6 +1,6 @@
 {
-  "version": "1.11.7",
-  "vsixUrl": "/releases/techword-code-1.11.7.vsix",
-  "notes": "Brain now shows the model's reasoning and decisions only — the files it reads/edits and the commands it runs stay in the chat, not in Brain.",
-  "sha256": "46ccfc7f04d7a0197f5f606d6061e5c634bed4ae1fa07eeb556f6cc67d62525f"
+  "version": "1.11.8",
+  "vsixUrl": "/releases/techword-code-1.11.8.vsix",
+  "notes": "Stability & polish: the Brain reasoning panel resets each turn instead of stacking; compaction notes and approval/question prompts no longer duplicate on reload; crashed MCP servers now reconnect automatically; safer multi-file edits and worktree renames; and hardened auto-update and workspace-config security.",
+  "sha256": "9bb38d15deedc18222e724a454c3a19587fcb3cd8ef9f5f2fdf22bce0ad960ed"
 }

@@ -25,6 +25,8 @@ process.stdin.on('data', (d) => {
     } else if (msg.method === 'tools/call') {
       const text = msg.params && msg.params.arguments && msg.params.arguments.text;
       send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'echo: ' + text }] } });
+      // Reply first, then die — lets a test simulate a mid-session server crash deterministically.
+      if (text === '__die__') { setTimeout(() => process.exit(1), 5); }
     }
   }
 });
@@ -90,6 +92,29 @@ test('disabled servers are not started', async () => {
   try {
     await hub.sync({ mock: { command: process.execPath, args: [server], disabled: true } });
     assert.equal(hub.hasTools(), false);
+  } finally {
+    hub.dispose();
+  }
+});
+
+const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+test('a server that crashes mid-session is reconnected on the next tool call', async () => {
+  const server = writeMockServer();
+  const hub = new McpHub();
+  try {
+    await hub.sync({ mock: { command: process.execPath, args: [server] } });
+    assert.equal(await hub.callTool('mcp__mock__echo', { text: 'hello' }), 'echo: hello');
+
+    // Trigger the mock to reply then exit, simulating a runtime crash of the server process.
+    assert.equal(await hub.callTool('mcp__mock__echo', { text: '__die__' }), 'echo: __die__');
+    await delay(200); // let the child's exit propagate so the client reads as not-running
+
+    // The next call must transparently relaunch the server and succeed — not fail permanently.
+    assert.equal(await hub.callTool('mcp__mock__echo', { text: 'after' }), 'echo: after');
+    const status = hub.statusList().find((s) => s.server === 'mock');
+    assert.equal(status?.running, true, 'the server should be marked running again after reconnect');
+    assert.equal(status?.toolCount, 1);
   } finally {
     hub.dispose();
   }

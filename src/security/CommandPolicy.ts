@@ -78,3 +78,15 @@ function isSafeSegment(segment: string): boolean {
   if (SAFE_LEADERS.has(leader) && !/[>]/.test(segment)) { return true; } // no output redirection
   return false;
 }
+
+/** How a proposed tool action is handled BEFORE any UI, given the current auto-approve policy and (for
+ *  commands) how dangerous it is: run it now, ASK the user (park a card to click), or REJECT it outright.
+ *  The subtle rule is the last one. In Bypass the user opted into an UNATTENDED run, so a 'blocked'
+ *  (catastrophic) command must never auto-RUN — but parking it for a click that may never come (panel
+ *  closed, overnight) is exactly the hang the user reported. So it is REJECTED and the run continues;
+ *  attended Manual/Edit modes (autoRun=false) still ASK, preserving the "human clicks" safety net there. */
+export type ApprovalDecision = 'auto' | 'ask' | 'reject';
+export function approvalDecision(input: { autoRun: boolean; blocked: boolean }): ApprovalDecision {
+  if (input.blocked) { return input.autoRun ? 'reject' : 'ask'; }
+  return input.autoRun ? 'auto' : 'ask';
+}

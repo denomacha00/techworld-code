@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyCommand } from '../src/security/CommandPolicy';
+import { classifyCommand, approvalDecision } from '../src/security/CommandPolicy';
 
 test('dangerous commands are blocked', () => {
   for (const cmd of [
@@ -62,4 +62,27 @@ test('user-supplied blocked patterns are honoured', () => {
 
 test('a safe command is not blocked by an unrelated user pattern', () => {
   assert.equal(classifyCommand('ls -la', ['terraform destroy']).level, 'safe');
+});
+
+// approvalDecision is the anti-hang gate. The one rule that MUST hold: a blocked (catastrophic) command in an
+// unattended run (autoRun, i.e. Bypass) is REJECTED, never parked for a click that may never come — that
+// parked-forever wait is the "stacking"/hang the user reported. It must also never auto-RUN. Attended
+// Manual/Edit modes still ASK so the human keeps the click. Everything non-blocked flows normally.
+test('a blocked command in an unattended (Bypass) run is rejected — never parked, never auto-run', () => {
+  assert.equal(approvalDecision({ autoRun: true, blocked: true }), 'reject');
+});
+
+test('a blocked command in an attended run still asks — the human keeps the click', () => {
+  assert.equal(approvalDecision({ autoRun: false, blocked: true }), 'ask');
+});
+
+test('a non-blocked command auto-runs when auto-approve is on, and asks when it is off', () => {
+  assert.equal(approvalDecision({ autoRun: true, blocked: false }), 'auto');
+  assert.equal(approvalDecision({ autoRun: false, blocked: false }), 'ask');
+});
+
+test('approvalDecision never returns auto for a blocked command in ANY mode — the core safety invariant', () => {
+  for (const autoRun of [true, false]) {
+    assert.notEqual(approvalDecision({ autoRun, blocked: true }), 'auto', 'a blocked command must never auto-run');
+  }
 });

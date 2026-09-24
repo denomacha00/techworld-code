@@ -2,7 +2,7 @@
   "name": "techword-code",
   "displayName": "Techword Code",
   "description": "Techword Code is an approval-first coding agent powered by Techword API.",
-  "version": "1.11.7",
+  "version": "1.11.8",
   "publisher": "techwordcode",
   "license": "SEE LICENSE IN LICENSE.txt",
   "icon": "resources/icon.png",
@@ -201,21 +201,25 @@
         "techwordCode.checkForUpdatesOnStartup": {
           "type": "boolean",
           "default": true,
+          "scope": "application",
           "description": "Check for a newer Techword Code version shortly after VS Code starts. When a newer build exists you'll be offered a one-click update."
         },
         "techwordCode.autoUpdate": {
           "type": "boolean",
           "default": false,
+          "scope": "application",
           "description": "Automatically download and install a newer Techword Code version when one is found, then offer to reload. When off, you're asked first before anything is installed."
         },
         "techwordCode.updateUrl": {
           "type": "string",
           "default": "",
+          "scope": "application",
           "description": "Override the update server URL (the latest.json endpoint). Leave blank to use the built-in Techword release server."
         },
         "techwordCode.mcpServers": {
           "type": "object",
           "default": {},
+          "scope": "machine",
           "markdownDescription": "External MCP (Model Context Protocol) servers to connect. Each key is a server name; each value has a `command`, optional `args`, `env`, `cwd`, and `disabled`. Their tools become available to the agent (approval-gated) as `mcp__<server>__<tool>`. Example: `{ \"filesystem\": { \"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-filesystem\", \".\"] } }`",
           "additionalProperties": {
             "type": "object",

@@ -35,8 +35,18 @@ function isBlockedFetchHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
   if (!host) { return true; }
   if (host === 'localhost' || host.endsWith('.localhost') || host === 'metadata.google.internal') { return true; }
-  // IPv6 loopback / unique-local (fc00::/7) / link-local (fe80::/10).
-  if (host === '::1' || host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')) { return true; }
+  // An IPv6 literal is the ONLY place the fc../fd../fe8.. prefix checks are valid. Applying them to plain
+  // hostnames wrongly blocked real public domains (fc2.com, fda.gov, feb…). IPv6 literals contain a ':'.
+  if (host.includes(':')) {
+    // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) reaches the same target as its v4 form — re-check the
+    // trailing dotted-quad through the IPv4 rules so it can't slip past the metadata/private guards.
+    const mappedV4 = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(host)?.[1];
+    if (mappedV4) { return isBlockedFetchHost(mappedV4); }
+    if (host === '::1' || host === '::') { return true; }                                                     // loopback / unspecified
+    if (host.startsWith('fc') || host.startsWith('fd')) { return true; }                                      // unique-local fc00::/7
+    if (host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')) { return true; } // link-local fe80::/10
+    return false;
+  }
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (m) {
     const a = Number(m[1]); const b = Number(m[2]);
@@ -80,7 +90,10 @@ export class WorkspaceToolExecutor {
       const occurrences = content.split(edit.oldText).length - 1;
       if (occurrences === 0) { throw new Error(`Edit ${index + 1} for ${path}: oldText was not found. Re-read the file and copy the exact text (with indentation).`); }
       if (occurrences > 1 && !edit.replaceAll) { throw new Error(`Edit ${index + 1} for ${path}: oldText appears ${occurrences} times. Add more surrounding context to make it unique, or set replaceAll.`); }
-      content = edit.replaceAll ? content.split(edit.oldText).join(edit.newText) : content.replace(edit.oldText, edit.newText);
+      // Both branches insert newText LITERALLY. split/join never interprets it; the single-replace branch
+      // uses a function replacer so a `$` in the new code (e.g. `$&`, `$1`, `$$`, template literals) is not
+      // mangled by String.replace's special replacement patterns — that silently corrupted edits before.
+      content = edit.replaceAll ? content.split(edit.oldText).join(edit.newText) : content.replace(edit.oldText, () => edit.newText);
     }
     if (content === original) { throw new Error(`No changes for ${path}: the edits left the file unchanged.`); }
     return { path, content, operation: 'modify' };
@@ -380,19 +393,35 @@ export class WorkspaceToolExecutor {
 
   /** Apply approved edits and record a checkpoint of the prior state so the change can be reverted. */
   async applyEdits(edits: FileEdit[]): Promise<string> {
+    // Pass 1 — read every file's current state and validate all edits (hash match, renameTo present)
+    // BEFORE touching disk. A bad edit here aborts with nothing changed, instead of the old behaviour
+    // where a hash mismatch on edit #3 left edits #1–2 already written. The captured `before` states also
+    // become the checkpoint, recorded up front (below) so that even a failure during pass 2 stays fully
+    // revertable — the earlier code recorded the checkpoint only AFTER applying, so a mid-batch throw
+    // stranded already-written files with no way to undo them.
     const before: Array<{ path: string; before: string | null }> = [];
     for (const edit of edits) {
-      const target = this.uri(edit.path);
-      const existing = await this.readExisting(target);
+      const existing = await this.readExisting(this.uri(edit.path));
       this.assertExpectedHash(edit, existing);
+      if (edit.operation === 'rename' && !edit.renameTo) { throw new Error(`Cannot rename ${edit.path}: renameTo is missing.`); }
       before.push({ path: edit.path, before: existing ?? null });
+      if (edit.operation === 'rename' && edit.renameTo) {
+        before.push({ path: edit.renameTo, before: (await this.readExisting(this.uri(edit.renameTo))) ?? null });
+      }
+    }
+    const id = randomUUID();
+    this.checkpoints.set(id, { id, files: before });
+
+    // Pass 2 — apply. The checkpoint above already covers every file's prior state, so any failure here
+    // leaves a change the user can still revert.
+    for (const edit of edits) {
+      const target = this.uri(edit.path);
       if (edit.operation === 'delete') {
         try { await vscode.workspace.fs.delete(target, { useTrash: false, recursive: false }); }
         catch (error) { throw new Error(`Could not delete ${edit.path}: ${error instanceof Error ? error.message : String(error)}`); }
       } else if (edit.operation === 'rename') {
         if (!edit.renameTo) { throw new Error(`Cannot rename ${edit.path}: renameTo is missing.`); }
         const renameTarget = this.uri(edit.renameTo);
-        before.push({ path: edit.renameTo, before: (await this.readExisting(renameTarget)) ?? null });
         try { await vscode.workspace.fs.rename(target, renameTarget, { overwrite: false }); }
         catch (error) { throw new Error(`Could not rename ${edit.path} → ${edit.renameTo}: ${error instanceof Error ? error.message : String(error)}`); }
       } else {
@@ -409,8 +438,6 @@ export class WorkspaceToolExecutor {
         }
       }
     }
-    const id = randomUUID();
-    this.checkpoints.set(id, { id, files: before });
     // Show the edited file so the user sees the change land in the editor.
     const shown = edits.find((edit) => edit.operation !== 'delete');
     if (shown) { void this.reveal(this.uri(shown.operation === 'rename' && shown.renameTo ? shown.renameTo : shown.path), true); }

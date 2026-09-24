@@ -8,7 +8,7 @@ import { OpenAICompatibleClient } from '../providers/OpenAICompatibleClient';
 import { ApprovalBroker } from '../security/ApprovalBroker';
 import { WorkspaceToolExecutor } from '../tools/WorkspaceToolExecutor';
 import { WorktreeManager } from '../agent/WorktreeManager';
-import { classifyCommand } from '../security/CommandPolicy';
+import { classifyCommand, approvalDecision } from '../security/CommandPolicy';
 import { McpHub } from '../mcp/McpHub';
 import { labelForModel } from '../TechwordConfig';
 import type { AgentEvent, ApprovalRequest, Attachment, ChatMessage, ContentPart, ConversationMeta, McpServerConfig, StoredConversation } from '../types';
@@ -27,7 +27,7 @@ type OutMessage =
   | { kind: 'toolResult'; summary: string }
   | { kind: 'cmdResult'; token: string; output: string; failed: boolean }
   | { kind: 'checkpoint'; id: string; summary: string }
-  | { kind: 'question'; text: string; options?: string[] }
+  | { kind: 'question'; id: string; text: string; options?: string[] }
   | { kind: 'queued'; items: Array<{ id: string; text: string }> }
   | { kind: 'preview'; dataUrl: string; name: string }
   | { kind: 'compacted'; message: string }
@@ -67,7 +67,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
   static readonly viewType = 'techwordCode.chat';
   private view: vscode.WebviewView | undefined;
   private session: AgentSession | undefined;
-  private readonly pendingApprovals = new Map<string, (approved: boolean) => void>();
+  // The full parked approval (not just its resolver) so a webview RELOAD can re-post the card. Without the
+  // request kept here, reloading the panel (window reload, extension update) leaves the resolver waiting in
+  // the host with no card in the fresh DOM to click — the turn hangs forever. This is the core "it stacked
+  // and never finished" fix, alongside retainContextWhenHidden (which covers hide/show) in extension.ts.
+  private readonly pendingApprovals = new Map<string, { resolve: (approved: boolean) => void; request: ApprovalRequest; warning?: string }>();
+  /** A parked ask_user question, kept so it too can be re-posted to a reloaded webview (same hang as a
+   *  stranded approval card). Cleared when answered, on Stop, on a new task, and when the turn completes. */
+  private pendingQuestion: { id: string; text: string; options?: string[] } | undefined;
   private pendingAttachments: Attachment[] = [];
   private readonly store: ConversationStore;
   private readonly memory: MemoryStore;
@@ -112,8 +119,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 
   stop(): void {
     this.session?.stop();
-    for (const [id, resolve] of this.pendingApprovals) { resolve(false); this.post({ kind: 'approvalResolved', id, approved: false }); }
+    for (const [id, parked] of this.pendingApprovals) { parked.resolve(false); this.post({ kind: 'approvalResolved', id, approved: false }); }
     this.pendingApprovals.clear();
+    this.pendingQuestion = undefined;
   }
 
   private post(message: OutMessage): void { void this.view?.webview.postMessage(message); }
@@ -138,7 +146,14 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       case 'commandOutput': this.post({ kind: 'commandOutput', chunk: event.chunk }); break; // live terminal output, streamed faded under the command card
       case 'toolResult': this.post({ kind: 'toolResult', summary: event.summary }); this.scheduleSave(); break; // persist mid-turn — a tool round just landed in history
       case 'checkpoint': this.post({ kind: 'checkpoint', id: event.id, summary: event.summary }); this.scheduleSave(); break;
-      case 'question': this.post({ kind: 'question', text: event.text, options: event.options }); break;
+      case 'question': {
+        // A stable id lets the webview dedupe the card if getState re-posts it on a panel reload
+        // (repostPending) — without it a reload stacks a second copy of the same question.
+        const qid = `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        this.pendingQuestion = { id: qid, text: event.text, options: event.options };
+        this.post({ kind: 'question', id: qid, text: event.text, options: event.options });
+        break;
+      }
       case 'preview': this.post({ kind: 'preview', dataUrl: event.dataUrl, name: event.name }); break;
       case 'usage': { const c = this.costConfig(); this.post({ kind: 'usage', total: event.total, window: event.window, limit: event.limit, usdPerMillion: c.usdPerMillion, showCost: c.showCost }); break; }
       case 'billing': this.post({ kind: 'billing', spentUsd: event.spentUsd, limitUsd: event.limitUsd, meterInCents: event.meterInCents }); break;
@@ -146,7 +161,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       case 'queued': this.post({ kind: 'queued', items: event.items }); break;
       case 'thinking': this.post({ kind: 'thinking', text: event.text }); break; // real reasoning → Activity panel
       case 'error': this.post({ kind: 'error', message: event.message }); break;
-      case 'complete': this.post({ kind: 'complete' }); break;
+      case 'complete': this.pendingQuestion = undefined; this.post({ kind: 'complete' }); break;
     }
   }
 
@@ -161,19 +176,38 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // auto-run — not even in Bypass. This matches CommandPolicy's contract and stops an injected instruction
     // in the repo/tool output from silently detonating a destructive command overnight. Such a command still
     // appears in chat with a warning; the human must click. Everything else runs unattended as before.
-    let auto = (request.kind === 'edits' && this.autoApprove.edits) || ((request.kind === 'command' || request.kind === 'mcp' || request.kind === 'folder') && this.autoApprove.commands);
+    const autoRun = (request.kind === 'edits' && this.autoApprove.edits) || ((request.kind === 'command' || request.kind === 'mcp' || request.kind === 'folder') && this.autoApprove.commands);
     let warning: string | undefined;
+    let blocked = false;
     if (request.kind === 'command') {
-      const blocked = vscode.workspace.getConfiguration('techwordCode').get<string[]>('blockedCommands', []);
-      const verdict = classifyCommand(request.command, blocked);
+      const blockedPatterns = vscode.workspace.getConfiguration('techwordCode').get<string[]>('blockedCommands', []);
+      const verdict = classifyCommand(request.command, blockedPatterns);
       if (verdict.level === 'blocked') {
-        auto = false;
+        blocked = true;
         warning = verdict.reason ? `Blocked from auto-run: ${verdict.reason}. Review carefully before approving.` : 'Potentially dangerous — review carefully before approving.';
       }
     }
-    this.post({ kind: 'approvalRequest', request, auto, warning });
-    if (auto) { return Promise.resolve(true); } // still shown in chat, just not gated on a click
-    return new Promise<boolean>((resolve) => { this.pendingApprovals.set(request.id, resolve); });
+    // The run/ask/reject rule lives in CommandPolicy (pure + unit-tested). 'reject' is the unattended-safety
+    // case: a blocked command in Bypass is skipped so the run never hangs on a click that may never come
+    // (panel closed, overnight) — the warning card is posted then immediately resolved-rejected, and the run
+    // continues. 'auto' still shows the card in chat, just not gated on a click. 'ask' parks a resolver.
+    const decision = approvalDecision({ autoRun, blocked });
+    this.post({ kind: 'approvalRequest', request, auto: decision === 'auto', warning });
+    if (decision === 'auto') { return Promise.resolve(true); }
+    if (decision === 'reject') { this.post({ kind: 'approvalResolved', id: request.id, approved: false }); return Promise.resolve(false); }
+    return new Promise<boolean>((resolve) => { this.pendingApprovals.set(request.id, { resolve, request, warning }); });
+  }
+
+  /** Re-post everything the host is still blocked on to a freshly (re)loaded webview: parked approval cards
+   *  and a pending ask_user question. A webview reload rebuilds the DOM but the resolvers keep waiting in the
+   *  host, so without this the fresh panel shows no card/question to answer and the turn hangs. Called from
+   *  the getState pull the webview fires on load. Idempotent — re-posting an id the DOM already shows is a
+   *  no-op there. */
+  private repostPending(): void {
+    for (const { request, warning } of this.pendingApprovals.values()) {
+      this.post({ kind: 'approvalRequest', request, auto: false, warning });
+    }
+    if (this.pendingQuestion) { this.post({ kind: 'question', id: this.pendingQuestion.id, text: this.pendingQuestion.text, options: this.pendingQuestion.options }); }
   }
 
   private async ensureSession(): Promise<AgentSession | undefined> {
@@ -537,7 +571,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       case 'submit':
         if (typeof input.prompt === 'string' && input.prompt.trim()) {
           const text = input.prompt.trim();
-          if (this.session?.awaitingAnswer) { this.session.answer(text); }
+          if (this.session?.awaitingAnswer) { this.pendingQuestion = undefined; this.session.answer(text); }
           else if (this.session?.running) { this.session.enqueue(text); }
           else { await this.startTask(text); }
         }
@@ -565,8 +599,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         break;
       case 'approvalResponse':
         if (typeof input.id === 'string') {
-          const resolve = this.pendingApprovals.get(input.id);
-          if (resolve) { this.pendingApprovals.delete(input.id); resolve(input.approved === true); this.post({ kind: 'approvalResolved', id: input.id, approved: input.approved === true }); }
+          const parked = this.pendingApprovals.get(input.id);
+          if (parked) { this.pendingApprovals.delete(input.id); parked.resolve(input.approved === true); this.post({ kind: 'approvalResolved', id: input.id, approved: input.approved === true }); }
         }
         break;
       case 'editQueued':
@@ -642,17 +676,29 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
         break;
       }
       case 'testConnection': await this.testConnection(); break;
-      case 'getState': await this.postState(); break;
+      case 'getState':
+        // A webview (re)load pulls state — and is our chance to re-hydrate anything the host is still
+        // blocked on. Re-post parked approval cards and a pending question so a reload can't strand the run
+        // with a resolver waiting in the host and no card in the DOM to answer it.
+        await this.postState();
+        this.repostPending();
+        break;
     }
   }
 
   private async newTask(): Promise<void> {
     await this.saveCurrent();
+    // Settle anything the previous task was blocked on before tearing it down, mirroring stop(): resolve
+    // every parked approval as rejected (so its promise can't dangle) and tell the webview to clear the
+    // card. Without this, hitting "New chat" while an approval was waiting stranded a resolver in the host.
+    for (const [id, parked] of this.pendingApprovals) { parked.resolve(false); this.post({ kind: 'approvalResolved', id, approved: false }); }
+    this.pendingApprovals.clear();
     try { this.session?.reset(); } catch (error) { this.post({ kind: 'error', message: error instanceof Error ? error.message : String(error) }); return; }
     this.conversationId = crypto.randomUUID();
     this.conversationCreatedAt = Date.now();
     this.customTitle = undefined;
     this.pendingAttachments = [];
+    this.pendingQuestion = undefined;
     this.post({ kind: 'attachments', items: [] });
   }
 
@@ -883,7 +929,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
 <section id="transcript" class="transcript hidden" aria-label="Brain — the model's reasoning">
   <button id="transcriptClose" class="transcript-close" title="Hide Brain" aria-label="Hide Brain">✕</button>
   <div id="transcriptList" class="transcript-list"></div>
-  <p id="transcriptEmpty" class="transcript-empty hidden">Brain is open — Techword's live reasoning streams here as it works: what it's thinking, what it decides, and why. The files it reads and edits and the commands it runs stay in the chat; this panel is just the thinking. If it stays empty, the model didn't return reasoning for this step.</p>
+  <p id="transcriptEmpty" class="transcript-empty hidden">Brain is open — Techword's live reasoning streams here as it works: what it's thinking, what it decides, and why. The files it reads and edits and the commands it runs stay in the chat; this panel is just the thinking. Opening Brain turns reasoning on from Techword's next step, so it fills in as the work continues — if it's mid-step right now, give it a moment.</p>
 </section>
 
 <div id="queued" class="queued-tray"></div>

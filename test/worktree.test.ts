@@ -11,10 +11,12 @@ test('parseNameStatusZ reads add/modify/delete entries', () => {
   ]);
 });
 
-test('parseNameStatusZ keeps the destination path for renames/copies', () => {
-  // R<score>\0<old>\0<new> — the new path is what now exists in the worktree.
+test('parseNameStatusZ keeps the destination path for renames/copies and deletes the renamed-from path', () => {
+  // R<score>\0<old>\0<new> — the new path is what now exists; the old path must be removed on integrate.
+  // C<score>\0<src>\0<dst> — a copy leaves its source in place, so only the destination is reported.
   const z = 'R100\0old/name.ts\0new/name.ts\0C75\0a.ts\0b.ts\0';
   assert.deepEqual(parseNameStatusZ(z), [
+    { status: 'D', path: 'old/name.ts' },
     { status: 'R', path: 'new/name.ts' },
     { status: 'R', path: 'b.ts' }
   ]);

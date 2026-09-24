@@ -9,9 +9,22 @@ const src = readFileSync(new URL('../media/main.js', import.meta.url), 'utf8');
 
 function matches(node, sel) {
   if (!sel || !node) { return false; }
-  if (sel[0] === '.') { return node.classList.contains(sel.slice(1)); }
-  if (sel[0] === '#') { return node._id === sel.slice(1); }
-  return node.tagName === sel.toUpperCase();
+  // Support a base (.class / #id / tag) optionally followed by [attr="val"] — the dedupe guards in
+  // addApproval/addQuestion query by `.approval[data-id="…"]`, so the harness must honour that form.
+  const attr = sel.match(/\[([a-zA-Z0-9_-]+)=["']?([^"'\]]*)["']?\]$/);
+  const base = attr ? sel.slice(0, sel.length - attr[0].length) : sel;
+  let baseOk;
+  if (!base) { baseOk = true; }
+  else if (base[0] === '.') { baseOk = node.classList.contains(base.slice(1)); }
+  else if (base[0] === '#') { baseOk = node._id === base.slice(1); }
+  else { baseOk = node.tagName === base.toUpperCase(); }
+  if (!baseOk || !attr) { return baseOk; }
+  const name = attr[1];
+  if (name.indexOf('data-') === 0) {
+    const key = name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    return !!node.dataset && node.dataset[key] === attr[2];
+  }
+  return !!node.getAttribute && node.getAttribute(name) === attr[2];
 }
 function makeEl(tag) {
   const cls = {
@@ -34,6 +47,7 @@ function makeEl(tag) {
     set title(v) { this._title = v; }, get title() { return this._title || ''; },
     get childElementCount() { return this._children.length; },
     get firstElementChild() { return this._children[0] || null; },
+    get lastElementChild() { return this._children[this._children.length - 1] || null; },
     append() { for (const c of arguments) { this._children.push(c); } },
     appendChild(c) { this._children.push(c); return c; },
     removeChild(c) { const i = this._children.indexOf(c); if (i >= 0) { this._children.splice(i, 1); } return c; },
@@ -85,12 +99,26 @@ const seq = [
   { kind: 'checkpoint', id: 'c1', summary: 'edited files' },
   { kind: 'usage', total: 1234, window: 1234, limit: 120000 },
   { kind: 'tool', name: 'user_message', detail: 'one more thing' },
-  { kind: 'approval', request: { id: 'a1', kind: 'command', command: 'ls', cwd: '.', purpose: 'list' } },
+  { kind: 'approvalRequest', request: { id: 'a1', kind: 'command', command: 'ls', cwd: '.', purpose: 'list' }, auto: false },
   { kind: 'error', message: 'Some error' },
   { kind: 'complete' },
 ];
 for (const m of seq) { fire(m); }
 console.log('MSG_OK: fired ' + seq.length + ' message kinds, no throw');
+
+// Dedupe guards for the "stacking" fixes. A re-post of the SAME approval / question / compaction note
+// (exactly what repostPending does when a panel reload pulls getState) must reuse the one card/line, never
+// stack a duplicate. Measure the delta so this is independent of what the sequence above already rendered.
+const log = byId['log'];
+function countClass(cls) { return log._children.filter((c) => c.classList && c.classList.contains(cls)).length; }
+function fireTwiceDelta(cls, m) { const before = countClass(cls); fire(m); fire(m); return countClass(cls) - before; }
+const apDelta = fireTwiceDelta('approval', { kind: 'approvalRequest', request: { id: 'dup1', kind: 'command', command: 'ls', cwd: '.', purpose: 'list' }, auto: false });
+if (apDelta !== 1) { die('DEDUP_FAIL (approval): a re-posted approval id must not stack — added ' + apDelta + ' cards'); }
+const qDelta = fireTwiceDelta('question-line', { kind: 'question', id: 'q-dup', text: 'Pick one', options: ['a', 'b'] });
+if (qDelta !== 1) { die('DEDUP_FAIL (question): a re-posted question id must not stack — added ' + qDelta + ' cards'); }
+const noteDelta = fireTwiceDelta('note-line', { kind: 'compacted', message: 'Summarised earlier context to free up room.' });
+if (noteDelta !== 1) { die('DEDUP_FAIL (compacted): a repeated compaction note must collapse — added ' + noteDelta + ' notes'); }
+console.log('DEDUP_OK: approval, question, and compaction-note re-posts each collapse to one');
 
 // Per-CHAT counter → TOKENS, never dollars. Fire totals through the REAL renderUsage in main.js and assert
 // the shipped el.usage text. The money figure lives in the HEADER (keyTotal), not here — so the breaking
