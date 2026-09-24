@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { AgentSession, type ContextMode, type MemorySink } from '../agent/AgentSession';
+import { AgentSession, summarizeResult, type ContextMode, type MemorySink } from '../agent/AgentSession';
 import { ConversationStore } from '../agent/ConversationStore';
 import { MemoryStore } from '../agent/MemoryStore';
 import { filesTouched } from '../agent/ConversationInsights';
@@ -13,7 +13,10 @@ import { McpHub } from '../mcp/McpHub';
 import { labelForModel } from '../TechwordConfig';
 import type { AgentEvent, ApprovalRequest, Attachment, ChatMessage, ContentPart, ConversationMeta, McpServerConfig, StoredConversation } from '../types';
 
-interface DisplayItem { role: 'user' | 'assistant'; text: string; }
+// A single row in a reopened conversation's replay. Beyond plain text we carry the full working
+// timeline — tool calls (with the same detail shown live), their result summaries, and the model's
+// reasoning — so History restores exactly what was on screen while coding, in order, not just the text.
+interface DisplayItem { role: 'user' | 'assistant' | 'think' | 'tool' | 'toolResult'; text?: string; name?: string; detail?: string; summary?: string; }
 
 /** Messages the extension posts to the webview. */
 type OutMessage =
@@ -44,6 +47,43 @@ type OutMessage =
   | { kind: 'load'; items: DisplayItem[]; title: string };
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg']);
+
+/** Reconstruct the one-line detail a tool card showed live (path, command, query, url…) from the saved
+ *  tool_call arguments, mirroring the emitters in AgentSession.executeTool so a reopened conversation's
+ *  cards read identically to when they ran. Best-effort: unknown/garbled args just yield an empty detail. */
+function describeToolCall(name: string, argsJson: string): string {
+  let a: Record<string, unknown> = {};
+  try { const parsed = JSON.parse(argsJson); if (parsed && typeof parsed === 'object') { a = parsed as Record<string, unknown>; } } catch { /* leave a empty */ }
+  const str = (key: string, fallback = ''): string => (typeof a[key] === 'string' && (a[key] as string) ? (a[key] as string) : fallback);
+  switch (name) {
+    case 'read_file': case 'outline_file': case 'preview_in_chat': case 'open_folder': return str('path');
+    case 'list_workspace_files': return str('path', '.');
+    case 'get_diagnostics': case 'code_map': return str('path', 'workspace');
+    case 'get_git_status': return 'git status';
+    case 'get_git_diff': return 'git diff';
+    case 'search_workspace': case 'find_symbol': case 'forget': return str('query');
+    case 'find_usages': return `${str('path')}:${typeof a.line === 'number' ? a.line : 1}`;
+    case 'web_fetch': return str('url');
+    case 'remember': return str('text');
+    case 'run_terminal_command': case 'run_background_command': return str('command');
+    case 'check_background_command': return str('token', 'all');
+    case 'stop_background_command': return str('token');
+    case 'edit_file': return str('path');
+    case 'propose_file_edits': {
+      const edits = Array.isArray(a.edits) ? a.edits : [];
+      const first = edits[0] as { path?: unknown } | undefined;
+      if (edits.length === 1 && first && typeof first.path === 'string') { return first.path; }
+      return edits.length ? `${edits.length} file change(s)` : 'Proposed file changes';
+    }
+    case 'spawn_explorer': {
+      const many = Array.isArray(a.tasks) ? a.tasks.filter((t): t is string => typeof t === 'string') : [];
+      const tasks = many.length ? many : (typeof a.task === 'string' ? [a.task] : []);
+      return tasks.length === 1 ? (tasks[0] ?? '') : (tasks.length ? `${tasks.length} tasks in parallel` : '');
+    }
+    default:
+      return name.startsWith('mcp__') ? name.replace(/^mcp__/, '').replace(/__/g, ': ') : '';
+  }
+}
 
 type OutputStyle = 'default' | 'concise' | 'explanatory' | 'code';
 
@@ -549,9 +589,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     // No pre-run postState: the controller isn't set yet, so it would report running:false and (with
     // the webview's authoritative setBusy) clear the bar the instant a task starts. run() emits its
     // own 'Working…' status; the post-run postState below reports the settled state.
-    await session.run(prompt, attachments);
-    await this.saveCurrent();
-    await this.postState();
+    // Persist and re-report state in a finally so a turn that THROWS (network drop, provider 400, an
+    // unexpected tool fault) still writes what ran to History — the previous "await run(); await save()"
+    // skipped the save on any throw, which is how a whole in-progress task could vanish on reopen.
+    try { await session.run(prompt, attachments); }
+    finally { await this.saveCurrent(); await this.postState(); }
   }
 
   private async retry(): Promise<void> {
@@ -559,9 +601,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (!session) { this.post({ kind: 'error', message: 'Connect a valid Techword API key in Settings (⚙) to start.' }); return; }
     // No pre-run postState here either — same reason as startTask: it would report running:false and
     // clear the bar just as the retry begins. retry()'s loop emits 'Working…' immediately.
-    await session.retry();
-    await this.saveCurrent();
-    await this.postState();
+    try { await session.retry(); }
+    finally { await this.saveCurrent(); await this.postState(); }
   }
 
   private async handleMessage(message: unknown): Promise<void> {
@@ -755,16 +796,34 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
       messages: this.sanitizeForStorage(messages),
       totalTokens: session.tokens
     };
-    this.saving = this.saving.then(() => this.store.save(record)).catch(() => undefined);
+    // Surface a save failure instead of swallowing it: a silently-failed write is exactly how a task
+    // could later be "gone" from History with no warning. sanitizeForStorage bounds the payload so this
+    // should be rare, but if globalState still rejects the write, the user finds out now, not later.
+    this.saving = this.saving.then(() => this.store.save(record)).catch((error) => {
+      this.post({ kind: 'error', message: `Couldn't save this chat to History: ${error instanceof Error ? error.message : String(error)}` });
+    });
     await this.saving;
   }
 
-  /** Drop bulky image data from persisted history to keep globalState small. */
+  /** Prepare messages for durable storage. Drops bulky image data and bounds any single oversized tool
+   *  output or text block, so one huge file read / command dump / search result can't grow a conversation
+   *  past what globalState will reliably persist (an unbounded record is how a whole task went missing on
+   *  reopen). The clip keeps the head and tail — enough to show the card summary and to continue the thread —
+   *  and marks what was trimmed. Normal-sized content is stored verbatim, untouched. */
   private sanitizeForStorage(messages: ChatMessage[]): ChatMessage[] {
+    const MAX = 24000; // per-block character cap for persisted history
+    const clip = (text: string): string =>
+      text.length <= MAX ? text
+        : `${text.slice(0, MAX - 600)}\n\n… [${text.length - MAX + 800} characters trimmed from saved history — the live run had the full output] …\n\n${text.slice(-200)}`;
     return messages.map((message) => {
       if (Array.isArray(message.content)) {
-        const parts: ContentPart[] = message.content.map((part) => part.type === 'image_url' ? { type: 'text', text: '[image attachment]' } : part);
+        const parts: ContentPart[] = message.content.map((part) =>
+          part.type === 'image_url' ? { type: 'text', text: '[image attachment]' }
+            : (part.type === 'text' && part.text.length > MAX ? { type: 'text', text: clip(part.text) } : part));
         return { ...message, content: parts };
+      }
+      if (typeof message.content === 'string' && message.content.length > MAX) {
+        return { ...message, content: clip(message.content) };
       }
       return message;
     });
@@ -787,13 +846,30 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     await this.postState();
   }
 
+  /** Rebuild the on-screen timeline of a saved conversation, in order: user turns, the model's
+   *  reasoning, its answer text, every tool call (with the detail shown live) and each tool's result
+   *  summary. This is what makes reopened History show "everything as it was", not just the text. */
   private displayFrom(messages: ChatMessage[]): DisplayItem[] {
     const items: DisplayItem[] = [];
+    const toolNames = new Map<string, string>(); // tool_call_id → tool name, to summarize its result row
     for (const message of messages) {
-      if (message.role === 'user') { items.push({ role: 'user', text: ConversationStore.plainText(message.content) }); }
-      else if (message.role === 'assistant') {
+      if (message.role === 'user') {
+        items.push({ role: 'user', text: ConversationStore.plainText(message.content) });
+      } else if (message.role === 'assistant') {
+        // Live order within a turn is: reasoning → answer → tool calls. Mirror it so the replay reads
+        // the same top-to-bottom as it did while coding.
+        for (const block of message.thinking_blocks ?? []) {
+          if (block.type === 'thinking' && block.thinking.trim()) { items.push({ role: 'think', text: block.thinking }); }
+        }
         const text = ConversationStore.plainText(message.content).trim();
         if (text) { items.push({ role: 'assistant', text }); }
+        for (const call of message.tool_calls ?? []) {
+          toolNames.set(call.id, call.function.name);
+          items.push({ role: 'tool', name: call.function.name, detail: describeToolCall(call.function.name, call.function.arguments) });
+        }
+      } else if (message.role === 'tool') {
+        const name = message.name ?? (message.tool_call_id ? toolNames.get(message.tool_call_id) : undefined) ?? '';
+        items.push({ role: 'toolResult', summary: summarizeResult(name, ConversationStore.plainText(message.content)) });
       }
     }
     return items;

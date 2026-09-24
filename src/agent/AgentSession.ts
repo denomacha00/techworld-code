@@ -1088,7 +1088,7 @@ function numberArg(value: Record<string, unknown>, key: string, fallback: number
 function boolArg(value: Record<string, unknown>, key: string, fallback: boolean): boolean { const item = value[key]; return typeof item === 'boolean' ? item : fallback; }
 
 /** One short line describing what a tool produced, for the activity log. */
-function summarizeResult(name: string, result: string): string {
+export function summarizeResult(name: string, result: string): string {
   const text = result.trim();
   if (/^Tool error:|^The user rejected/i.test(text)) { return text.split('\n')[0]?.slice(0, 140) ?? ''; }
   const lines = text ? text.split('\n').length : 0;

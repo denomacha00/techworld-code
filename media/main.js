@@ -1074,6 +1074,12 @@
     updateBrainEmpty();
     (items || []).forEach((it) => {
       if (it.role === 'user') { addUser(it.text); }
+      else if (it.role === 'think') {
+        // Replay the model's reasoning into the Brain/Activity trail, line by line, as it read live.
+        String(it.text || '').split('\n').forEach((line) => { if (line.trim()) { logActivity(line.trim(), 'tr-think'); } });
+      }
+      else if (it.role === 'tool') { addTool(it.name, it.detail || ''); }
+      else if (it.role === 'toolResult') { addToolResult(it.summary || ''); }
       else {
         const d = makeAssistant();
         d.__raw = it.text;
@@ -1081,6 +1087,11 @@
         el.log.append(d);
       }
     });
+    // A reopened conversation is idle — settle the last tool card and stop the "working…" bar that
+    // replaying the tool cards (via addTool → pinWork) started, so History doesn't look like it's running.
+    settleLastTool();
+    showWork(false);
+    clearStatus();
     scrollToBottom();
   }
 

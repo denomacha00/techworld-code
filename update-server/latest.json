@@ -1,6 +1,6 @@
 {
-  "version": "1.11.9",
-  "vsixUrl": "/releases/techword-code-1.11.9.vsix",
-  "notes": "Smoother, more reliable runs: fixes a rare mid-run stall that could leave a task looking stuck, lets image/file-only messages send (no more hang on an attachment with no text), keeps a live status while background agents and long commands run so it never looks frozen, and clears the Brain reasoning trail when you switch chats so old thinking never carries over. Plus security hardening (command-safety, secret redaction, update checks).",
-  "sha256": "ddee20b6b96480f4e797ae62db4846a0b4fd2790084a83c9b38aaf2f20951cc7"
+  "version": "1.11.10",
+  "vsixUrl": "/releases/techword-code-1.11.10.vsix",
+  "notes": "History now replays the full working timeline (edits, reads, commands, reasoning) in order on reopen — not just text — and saves are hardened so a task can't silently go missing (fixes end-of-turn save on error + bounds oversized tool output).",
+  "sha256": "536432ad0f3439a6f800fbb107f97877edde92e098b6993343e707d9466e646c"
 }
