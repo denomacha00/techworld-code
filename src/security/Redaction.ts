@@ -11,6 +11,7 @@ const SENSITIVE_FULL = /^(\.env(\..+)?|\.npmrc|\.pypirc|\.netrc|\.dockercfg|\.pg
 // heuristic, so `const total = a + b;` is left untouched.
 const SECRET_PATTERNS: RegExp[] = [
   /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g, // PEM private keys
+  /\bsk-[a-z0-9]{2,}(?:-[a-z0-9]{2,})+/gi,                    // segmented sk- keys (sk-ant-…, sk-proj-…, sk-or-v1-…)
   /\b(?:sk|api)[_-]?[a-z0-9]{12,}\b/gi,                       // generic sk-/api- keys (OpenAI-style)
   /\b(?:r|s)k_(?:live|test)_[0-9A-Za-z]{16,}\b/g,             // Stripe secret/restricted keys
   /\bAKIA[0-9A-Z]{16}\b/g,                                    // AWS access key id
@@ -25,8 +26,10 @@ const SECRET_PATTERNS: RegExp[] = [
 
 // A credential-bearing assignment (password/secret/token/api_key = "…"): mask only the quoted VALUE and
 // keep the key name, so the model still sees the shape of the config without the literal secret. Requires
-// quotes + a real assignment, so it won't fire on `password: userInput` (an unquoted identifier).
-const ASSIGNED_SECRET = /((?:password|passwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|client[_-]?secret)["']?\s*[:=]\s*)(["'])([^"'\n]{6,})\2/gi;
+// quotes + a real assignment, so it won't fire on `password: userInput` (an unquoted identifier). The bare
+// `token` alternative uses a lookbehind so it fires on a standalone token field but NOT on the "token" tail
+// of an unrelated identifier (accessToken/csrfToken are already covered by their own compound alternatives).
+const ASSIGNED_SECRET = /((?:password|passwd|secret[_-]?key|secret|api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|auth[_-]?token|private[_-]?key|client[_-]?secret|(?<![a-z])token)["']?\s*[:=]\s*)(["'])([^"'\n]{6,})\2/gi;
 
 export function redact(value: string): string {
   let out = value;

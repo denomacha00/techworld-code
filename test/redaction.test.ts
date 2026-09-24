@@ -32,6 +32,35 @@ test('redact masks the value of a credential assignment but keeps the key name',
   assert.ok(!out.includes('hunter2secret'));
 });
 
+test('redact masks segmented sk- keys (sk-ant-…, sk-proj-…) that have internal hyphens', () => {
+  const antKey = 'sk-' + 'ant-' + 'api03-' + 'A'.repeat(24);
+  const projKey = 'sk-' + 'proj-' + 'B'.repeat(20);
+  assert.ok(!redact('key ' + antKey).includes('ant-api03'), 'Anthropic-style segmented key is masked');
+  assert.ok(redact('key ' + antKey).includes('[REDACTED]'));
+  assert.ok(redact('key ' + projKey).includes('[REDACTED]'));
+});
+
+test('redact masks more credential field names (token/access_token/apiToken/secretKey)', () => {
+  for (const line of [
+    'access_token = "abcdef123456"',
+    'accessToken: "abcdef123456"',
+    'apiToken = "abcdef123456"',
+    'secretKey: "abcdef123456"',
+    'token = "abcdef123456"'
+  ]) {
+    const out = redact(line);
+    assert.ok(out.includes('[REDACTED]'), `${line} → value masked`);
+    assert.ok(!out.includes('abcdef123456'), `${line} → secret value gone`);
+  }
+});
+
+test('redact does not over-mask an unrelated identifier ending in "token"', () => {
+  // `nextToken` is a common non-secret field (pagination cursor); the bare-token rule must not fire on the
+  // "token" tail of another identifier. (A real accessToken field IS caught by its own alternative above.)
+  const out = redact('const nextToken = "page-2-cursor";');
+  assert.ok(out.includes('page-2-cursor'), 'a pagination cursor is left readable');
+});
+
 test('isSensitivePath flags secret-like filenames', () => {
   assert.equal(isSensitivePath('.env'), true);
   assert.equal(isSensitivePath('.env.local'), true);

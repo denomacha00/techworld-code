@@ -1065,6 +1065,13 @@
     el.log.innerHTML = '';
     endAssistant();
     clearStatus();
+    // Switching conversations must also wipe the Brain trail: the reasoning rows and the half-parsed
+    // think buffer belong to the conversation we're leaving. Without this they bleed into the loaded
+    // one and read as stale "stacked" thinking. Mirrors the reset newTask/fresh-turn already do.
+    cancelActivityClear();
+    if (el.transcriptList) { el.transcriptList.innerHTML = ''; }
+    resetThinking();
+    updateBrainEmpty();
     (items || []).forEach((it) => {
       if (it.role === 'user') { addUser(it.text); }
       else {

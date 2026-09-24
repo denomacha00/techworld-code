@@ -568,14 +568,18 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     if (!message || typeof message !== 'object') { return; }
     const input = message as { kind?: unknown; [key: string]: unknown };
     switch (input.kind) {
-      case 'submit':
-        if (typeof input.prompt === 'string' && input.prompt.trim()) {
-          const text = input.prompt.trim();
-          if (this.session?.awaitingAnswer) { this.pendingQuestion = undefined; this.session.answer(text); }
-          else if (this.session?.running) { this.session.enqueue(text); }
-          else { await this.startTask(text); }
-        }
+      case 'submit': {
+        // A submit is real when there's text OR a pending attachment. The old guard required non-empty
+        // text, so an image/file-only send was silently dropped — yet the webview had already flipped to
+        // the busy "working" state, leaving the panel hung forever. Always progress the session so the
+        // UI can never stick: answer a pending question, enqueue while busy, else start the task.
+        const text = typeof input.prompt === 'string' ? input.prompt.trim() : '';
+        if (!text && this.pendingAttachments.length === 0) { break; }
+        if (this.session?.awaitingAnswer) { this.pendingQuestion = undefined; this.session.answer(text); }
+        else if (this.session?.running) { this.session.enqueue(text || '[attachment]'); }
+        else { await this.startTask(text); }
         break;
+      }
       case 'retry': await this.retry(); break;
       case 'setThinking':
         // The Brain toggle: reasoning is off by default (for speed); turning it on makes the model stream
@@ -779,7 +783,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider {
     this.pendingAttachments = [];
     this.post({ kind: 'load', title: stored.title, items: this.displayFrom(stored.messages) });
     { const c = this.costConfig(); this.post({ kind: 'usage', total: stored.totalTokens, usdPerMillion: c.usdPerMillion, showCost: c.showCost }); }
-    void session.refreshBilling(); // show real spend for this key on open, before the first turn
+    void session.refreshBilling(true); // show real spend for this key on open, before the first turn (bypass the per-turn throttle)
     await this.postState();
   }
 

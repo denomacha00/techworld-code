@@ -32,7 +32,7 @@ function symbolKind(kind: vscode.SymbolKind): string { return SYMBOL_KINDS[kind]
 /** True for hosts a fetch must NOT reach: loopback, private, link-local, or unique-local addresses, and
  *  cloud metadata. Blocks the classic SSRF targets while leaving ordinary public URLs alone. */
 function isBlockedFetchHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, ''); // strip IPv6 brackets
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, ''); // strip IPv6 brackets + a trailing FQDN dot ("localhost.", "169.254.169.254." reach the same target)
   if (!host) { return true; }
   if (host === 'localhost' || host.endsWith('.localhost') || host === 'metadata.google.internal') { return true; }
   // An IPv6 literal is the ONLY place the fc../fd../fe8.. prefix checks are valid. Applying them to plain
@@ -42,6 +42,13 @@ function isBlockedFetchHost(hostname: string): boolean {
     // trailing dotted-quad through the IPv4 rules so it can't slip past the metadata/private guards.
     const mappedV4 = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(host)?.[1];
     if (mappedV4) { return isBlockedFetchHost(mappedV4); }
+    // Same mapping written in hex (::ffff:a9fe:a9fe === ::ffff:169.254.169.254) — decode the two hextets
+    // back to a dotted quad and re-check, so the hex spelling can't bypass the guard the dotted one hits.
+    const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+    if (mappedHex) {
+      const hi = parseInt(mappedHex[1] ?? '0', 16); const lo = parseInt(mappedHex[2] ?? '0', 16);
+      return isBlockedFetchHost(`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`);
+    }
     if (host === '::1' || host === '::') { return true; }                                                     // loopback / unspecified
     if (host.startsWith('fc') || host.startsWith('fd')) { return true; }                                      // unique-local fc00::/7
     if (host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')) { return true; } // link-local fe80::/10

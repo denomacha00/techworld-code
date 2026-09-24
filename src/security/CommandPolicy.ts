@@ -58,6 +58,12 @@ export function classifyCommand(command: string, extraBlocked: string[] = []): C
   for (const { re, reason } of DANGEROUS) {
     if (re.test(text)) { return { level: 'blocked', reason }; }
   }
+  // Second pass: catch the SAME dangerous rm/git/chmod actions written in a form the regexes above miss
+  // (split flags `rm -r -f /`, long flags `rm --recursive --force`, git global options `git -C d reset
+  // --hard`, combined `chmod -Rf 777`, setuid `chmod 4777`). Parsed per-segment. Purely additive — it can
+  // only ADD a 'blocked' verdict the regex pass didn't already give, never downgrade one.
+  const parsed = dangerousByParse(text);
+  if (parsed) { return { level: 'blocked', reason: parsed }; }
 
   // Split on chaining/pipes so `git status && rm ...` is judged by its worst part.
   const segments = text.split(/&&|\|\||[;|]/).map((seg) => seg.trim()).filter(Boolean);
@@ -77,6 +83,78 @@ function isSafeSegment(segment: string): boolean {
   if (leader === 'git') { const sub = (tokens[1] ?? '').toLowerCase(); return SAFE_GIT_SUB.has(sub); }
   if (SAFE_LEADERS.has(leader) && !/[>]/.test(segment)) { return true; } // no output redirection
   return false;
+}
+
+/** Parse-based danger detection for rm/git/chmod, run per chained segment. Catches syntactic variants the
+ *  broad DANGEROUS regexes miss. Returns a reason (→ blocked) or undefined. */
+function dangerousByParse(text: string): string | undefined {
+  const segments = text.split(/&&|\|\||[;|]/).map((seg) => seg.trim()).filter(Boolean);
+  for (const seg of segments) {
+    const reason = dangerousRm(seg) ?? dangerousGit(seg) ?? dangerousChmod(seg);
+    if (reason) { return reason; }
+  }
+  return undefined;
+}
+
+/** rm is dangerous when it's recursive AND forced (any flag spelling), or targets a root/home/wildcard
+ *  path. Handles `-rf`, `-r -f`, `-fr`, `--recursive --force`, and `-R`. */
+function dangerousRm(seg: string): string | undefined {
+  const tokens = seg.split(/\s+/).filter(Boolean);
+  const idx = tokens.findIndex((t) => t.toLowerCase().replace(/\.exe$/i, '') === 'rm');
+  if (idx === -1) { return undefined; }
+  let recursive = false; let force = false; const targets: string[] = [];
+  for (const tok of tokens.slice(idx + 1)) {
+    if (tok === '--') { continue; }
+    if (tok === '--recursive') { recursive = true; continue; }
+    if (tok === '--force') { force = true; continue; }
+    if (tok.startsWith('--')) { continue; }                 // other long option (--verbose, --dir…)
+    if (tok.startsWith('-') && tok.length > 1) { if (/r/i.test(tok)) { recursive = true; } if (/f/.test(tok)) { force = true; } continue; }
+    targets.push(tok);
+  }
+  if (recursive && force) { return 'recursive force delete (rm -rf)'; }
+  if (targets.some((t) => /^(\/|~|\$HOME|\*)$/.test(t) || /^(\/|~|\$HOME)\/?\*?$/.test(t))) { return 'delete of a root/home/wildcard path'; }
+  return undefined;
+}
+
+/** git is dangerous for force push, hard reset, or clean -f — even behind global options like `-C dir`,
+ *  `-c k=v`, or `--git-dir=…` that sit between `git` and the subcommand. */
+function dangerousGit(seg: string): string | undefined {
+  const tokens = seg.split(/\s+/).filter(Boolean);
+  const idx = tokens.findIndex((t) => t.toLowerCase().replace(/\.exe$/i, '') === 'git');
+  if (idx === -1) { return undefined; }
+  let i = idx + 1;
+  const takesArg = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix']);
+  while (i < tokens.length) {
+    const t = tokens[i] ?? '';
+    if (takesArg.has(t)) { i += 2; continue; }              // option consumes the next token as its value
+    if (t.startsWith('-')) { i += 1; continue; }            // flag global option incl. --opt=value, --paginate, --bare
+    break;
+  }
+  const sub = (tokens[i] ?? '').toLowerCase();
+  const rest = tokens.slice(i + 1);
+  if (sub === 'push' && rest.some((t) => /^--force/.test(t) || t === '-f')) { return 'force push (rewrites remote history)'; }
+  if (sub === 'reset' && rest.some((t) => t === '--hard')) { return 'hard reset (discards local work)'; }
+  if (sub === 'clean' && rest.some((t) => t === '--force' || /^-[a-z]*f/i.test(t))) { return 'git clean -f (deletes untracked files)'; }
+  return undefined;
+}
+
+/** chmod is dangerous when it grants world-write-all (mode ending in 777, incl. setuid forms like 4777),
+ *  or recursively changes permissions on a filesystem path. Handles combined flags like `-Rf`. */
+function dangerousChmod(seg: string): string | undefined {
+  const tokens = seg.split(/\s+/).filter(Boolean);
+  const idx = tokens.findIndex((t) => t.toLowerCase() === 'chmod');
+  if (idx === -1) { return undefined; }
+  let recursive = false; const operands: string[] = [];
+  for (const tok of tokens.slice(idx + 1)) {
+    if (tok === '--recursive') { recursive = true; continue; }
+    if (tok.startsWith('-') && tok.length > 1) { if (/r/i.test(tok)) { recursive = true; } continue; }
+    operands.push(tok);
+  }
+  const mode = operands[0] ?? '';
+  const octal = /^[0-7]{3,4}$/.test(mode) ? mode.slice(-3) : '';
+  if (octal === '777') { return 'world-writable permissions'; }
+  if (recursive && operands.slice(1).some((t) => t.includes('/') || t === '~' || t.startsWith('~/'))) { return 'recursive permission change on a path'; }
+  return undefined;
 }
 
 /** How a proposed tool action is handled BEFORE any UI, given the current auto-approve policy and (for

@@ -121,9 +121,17 @@ export class AgentSession {
 
   /** Read the provider's REAL spend meter for this key and emit it, so the counter shows exact dollars
    *  deducted (input/output difference included) rather than a token estimate. Best-effort and fire-and-
-   *  forget: any failure is swallowed and the counter just keeps showing the token-based fallback. */
-  async refreshBilling(): Promise<void> {
+   *  forget: any failure is swallowed and the counter just keeps showing the token-based fallback.
+   *  Throttled to at most once per BILLING_MIN_INTERVAL_MS so a fast multi-turn tool loop doesn't fire two
+   *  extra gateway fetches on EVERY turn — that chatter competed with the live stream and added to the
+   *  "it stalls then goes" lag. `force` bypasses the throttle for the one-shot read when the panel opens. */
+  private lastBillingAt = 0;
+  private static readonly BILLING_MIN_INTERVAL_MS = 12000;
+  async refreshBilling(force = false): Promise<void> {
     if (!this.showCostUsd) { return; }
+    const now = Date.now();
+    if (!force && now - this.lastBillingAt < AgentSession.BILLING_MIN_INTERVAL_MS) { return; }
+    this.lastBillingAt = now;
     try {
       const client = new OpenAICompatibleClient(this.provider, this.apiKey, {});
       const billing = await client.fetchBillingUsd(this.meterInCents);
@@ -336,7 +344,7 @@ export class AgentSession {
         if (canRunInParallel(calls)) {
           // All pure reads — run them at once (each streams its own HTTP request / fs read), then push the
           // results in the ORIGINAL order so every tool_use still lines up with its tool_result for the API.
-          if (this.abortController?.signal.aborted) { return; }
+          if (this.abortController?.signal.aborted) { this.pushStoppedResults(calls); return; }
           const results = await Promise.all(calls.map((call) => this.executeTool(call)));
           for (let i = 0; i < calls.length; i += 1) {
             const call = calls[i]!; const result = results[i]!;
@@ -344,8 +352,13 @@ export class AgentSession {
             this.messages.push({ role: 'tool', content: result, tool_call_id: call.id, name: call.name });
           }
         } else {
-          for (const call of calls) {
-            if (this.abortController?.signal.aborted) { return; } // stop between tools when the user hits Stop
+          for (let idx = 0; idx < calls.length; idx += 1) {
+            const call = calls[idx]!;
+            // Stop between tools when the user hits Stop — but every tool_use we already emitted on the
+            // assistant turn NEEDS a matching tool_result, or the next request is a hard 400. Synthesize
+            // one for this call and every call still unrun, so the transcript stays valid and a later
+            // "continue" resumes cleanly instead of erroring.
+            if (this.abortController?.signal.aborted) { this.pushStoppedResults(calls.slice(idx)); return; }
             const result = await this.executeTool(call);
             this.emit({ type: 'toolResult', summary: summarizeResult(call.name, result) });
             this.messages.push({ role: 'tool', content: result, tool_call_id: call.id, name: call.name });
@@ -436,6 +449,16 @@ export class AgentSession {
 
   /** Fold any messages whose grace window has elapsed into the conversation. Messages still inside their
    *  window stay queued (chips stay editable) and get picked up on a later turn once they ripen. */
+  /** On a mid-batch Stop, the assistant turn's tool_use blocks were already pushed but their tools never
+   *  ran. Anthropic rejects an assistant tool_use with no matching tool_result on the NEXT request (a hard
+   *  400 that would kill a later "continue"). Synthesize a short stopped-result for each un-run call so the
+   *  transcript stays valid and resumable. */
+  private pushStoppedResults(calls: Array<{ id: string; name: string }>): void {
+    for (const call of calls) {
+      this.messages.push({ role: 'tool', content: 'Stopped by the user before this tool ran.', tool_call_id: call.id, name: call.name });
+    }
+  }
+
   private drainQueue(): void {
     if (this.queued.length === 0) { return; }
     const { ready, pending } = splitReadyQueue(this.queued, Date.now());
@@ -527,7 +550,10 @@ export class AgentSession {
     const texts = attachments.filter((item) => item.kind === 'text' && item.text);
     for (const file of texts) { text += `\n\n--- ${file.name} ---\n${file.text}`; }
     if (images.length === 0) { return text; }
-    const parts: ContentPart[] = [{ type: 'text', text }];
+    const parts: ContentPart[] = [];
+    // Skip an empty leading text block — an image-only send has no text, and Anthropic rejects a
+    // zero-length text block (400). An image block alone is a valid user turn.
+    if (text.trim()) { parts.push({ type: 'text', text }); }
     for (const image of images) { parts.push({ type: 'image_url', image_url: { url: image.dataUrl as string } }); }
     return parts;
   }
@@ -570,12 +596,23 @@ export class AgentSession {
 
     // Run every worker in parallel (each streams its own request and runs its own tools). A worktree
     // worker returns its captured file changes too; an explore-only worker returns just findings.
+    // Emit a live heartbeat as each one finishes so a long parallel run visibly progresses in the
+    // transcript ("2/3 agents done…") instead of going silent and looking hung while they think.
+    const total = clean.length;
+    let done = 0;
+    if (total > 1) { this.emit({ type: 'status', message: `Running ${total} agents in parallel — waiting for them to finish…` }); }
     const runs = await Promise.all(clean.map((task, index) => {
       const tag = clean.length > 1 ? `#${index + 1} ` : '';
       const run = canImplement
         ? this.runWorktreeWorker(task, tag)
         : this.runExplorer(task, tag).then((findings) => ({ findings, changes: [] as WorktreeChange[], diffStat: '' }));
-      return run.catch((error) => ({ findings: `Agent ${index + 1} failed: ${error instanceof Error ? error.message : String(error)}`, changes: [] as WorktreeChange[], diffStat: '' }));
+      return run
+        .catch((error) => ({ findings: `Agent ${index + 1} failed: ${error instanceof Error ? error.message : String(error)}`, changes: [] as WorktreeChange[], diffStat: '' }))
+        .then((result) => {
+          done += 1;
+          if (total > 1) { this.emit({ type: 'status', message: `${done}/${total} agents done${done < total ? ' — still working…' : ''}` }); }
+          return result;
+        });
     }));
 
     // Integrate the workers' changes into the REAL workspace SEQUENTIALLY (never in parallel) so writes
@@ -587,6 +624,7 @@ export class AgentSession {
       if (run.changes.length > 0) {
         if (this.abortController?.signal.aborted) { integration = '\nIntegration: skipped (stopped).'; }
         else {
+          this.emit({ type: 'status', message: `Integrating agent ${index + 1}${total > 1 ? `/${total}` : ''}…` });
           const edits = await this.executor.toFileEdits(run.changes);
           if (edits.length === 0) { integration = '\nIntegration: no net changes to your files.'; }
           else {

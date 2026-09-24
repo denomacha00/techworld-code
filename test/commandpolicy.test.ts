@@ -53,6 +53,37 @@ test('a chained command is judged by its most dangerous part', () => {
   assert.equal(classifyCommand('ls -la && cat foo').level, 'safe');
 });
 
+// Hardening: the same catastrophic actions written in a syntactic form the broad regexes miss must STILL
+// be blocked — split/long flags, git global options before the subcommand, combined/setuid chmod modes.
+test('rm recursive-force is blocked however the flags are written', () => {
+  for (const cmd of [
+    'rm -r -f /etc',            // split short flags
+    'rm -f -r build',           // reversed order
+    'rm -fr /',                 // combined, reversed
+    'rm --recursive --force /', // long flags
+    'rm --force --recursive x', // long flags, reversed
+    'rm -R -f /var'             // capital -R
+  ]) {
+    assert.equal(classifyCommand(cmd).level, 'blocked', `${cmd} should be blocked`);
+  }
+});
+
+test('git force-push / hard-reset / clean -f is blocked even behind global options', () => {
+  assert.equal(classifyCommand('git -C /repo reset --hard').level, 'blocked');
+  assert.equal(classifyCommand('git -c core.hooksPath=/dev/null push --force').level, 'blocked');
+  assert.equal(classifyCommand('git --git-dir=/r/.git push -f').level, 'blocked');
+  assert.equal(classifyCommand('git -C /repo clean -fdx').level, 'blocked');
+  // …but a plain push behind a global option is still just caution, not blocked.
+  assert.equal(classifyCommand('git -C /repo push').level, 'caution');
+});
+
+test('chmod world-writable and setuid-world modes are blocked, combined flags included', () => {
+  assert.equal(classifyCommand('chmod -Rf 777 /etc').level, 'blocked'); // combined -Rf defeats "-R "
+  assert.equal(classifyCommand('chmod 4777 /usr/bin/foo').level, 'blocked'); // setuid + world-write
+  assert.equal(classifyCommand('chmod 0777 file').level, 'blocked');
+  assert.equal(classifyCommand('chmod +x script.sh').level, 'caution'); // making executable is not catastrophic
+});
+
 test('user-supplied blocked patterns are honoured', () => {
   assert.equal(classifyCommand('terraform destroy', ['terraform\\s+destroy']).level, 'blocked');
   assert.equal(classifyCommand('kubectl delete ns prod', ['kubectl delete']).level, 'blocked');

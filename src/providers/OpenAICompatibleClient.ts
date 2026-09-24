@@ -96,6 +96,34 @@ export function withMessageCacheBreakpoint<T extends { role: string; content: un
   return out;
 }
 
+/** Merge adjacent same-role messages into one turn. Anthropic REQUIRES strictly alternating user/assistant
+ *  turns — two user (or two assistant) messages in a row are a hard 400 ("roles must alternate"). Our
+ *  history legitimately produces adjacent user turns: a run of tool_results becomes a user turn, and if a
+ *  queued follow-up message ripens right after it (or two follow-ups ripen together) drainQueue appends
+ *  more user turns behind it. A single user turn may hold tool_result blocks AND text blocks, and two text
+ *  blocks, so merging them is valid — and it's exactly what stops those follow-ups from killing the task
+ *  with a 400. Pure: never mutates the input (new message objects, new content arrays). */
+export function coalesceMessages(msgs: AnthropicMessage[]): AnthropicMessage[] {
+  const out: AnthropicMessage[] = [];
+  for (const msg of msgs) {
+    const prev = out[out.length - 1];
+    if (prev && prev.role === msg.role) {
+      const merged = anthropicParts(prev.content).concat(anthropicParts(msg.content));
+      prev.content = merged.length > 0 ? merged : [{ type: 'text', text: '(no content)' }];
+    } else {
+      out.push({ role: msg.role, content: msg.content });
+    }
+  }
+  return out;
+}
+
+/** Normalize a message's content to an AnthropicPart[] for merging. A non-empty string becomes one text
+ *  block; an empty string contributes nothing (an empty text block is itself a 400). */
+function anthropicParts(content: string | AnthropicPart[]): AnthropicPart[] {
+  if (typeof content === 'string') { return content.trim() ? [{ type: 'text', text: content }] : []; }
+  return content;
+}
+
 /** Detect a gateway rejection about cache_control, so we can drop caching and retry on the plain path —
  *  a stricter or older gateway degrades to no-cache instead of hard-failing the task on a 400/422. */
 export function isCacheRejection(status: number, rawDetail: string): boolean {
@@ -577,7 +605,7 @@ export class OpenAICompatibleClient {
         msgs.push({ role: 'user', content: results });
       }
     }
-    return { system, msgs };
+    return { system, msgs: coalesceMessages(msgs) };
   }
 
   private userContent(content: string | ContentPart[]): string | AnthropicPart[] {

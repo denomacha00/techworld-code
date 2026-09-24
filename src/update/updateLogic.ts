@@ -61,7 +61,10 @@ export function parseManifest(raw: unknown): UpdateManifest | undefined {
   const version = typeof obj.version === 'string' ? obj.version.trim() : '';
   const vsixUrl = typeof obj.vsixUrl === 'string' ? obj.vsixUrl.trim()
     : typeof obj.url === 'string' ? obj.url.trim() : '';
-  if (!version || !/^v?\d+(\.\d+)*/.test(version)) { return undefined; }
+  // Anchored end-to-end: a version is digits-and-dots (with an optional leading v and optional -prerelease
+  // tag) and NOTHING else. Without the `$` a value like "1.0.0/../evil" or "1.0.0; rm -rf" passed the check
+  // and could then be interpolated into a vsix filename/path — anchoring closes that traversal/injection.
+  if (!version || !/^v?\d+(\.\d+)*(-[0-9A-Za-z.]+)?$/.test(version)) { return undefined; }
   if (!vsixUrl) { return undefined; }
   const notes = typeof obj.notes === 'string' ? obj.notes
     : typeof obj.releaseNotes === 'string' ? obj.releaseNotes : undefined;

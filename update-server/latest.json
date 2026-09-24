@@ -1,6 +1,6 @@
 {
-  "version": "1.11.8",
-  "vsixUrl": "/releases/techword-code-1.11.8.vsix",
-  "notes": "Stability & polish: the Brain reasoning panel resets each turn instead of stacking; compaction notes and approval/question prompts no longer duplicate on reload; crashed MCP servers now reconnect automatically; safer multi-file edits and worktree renames; and hardened auto-update and workspace-config security.",
-  "sha256": "9bb38d15deedc18222e724a454c3a19587fcb3cd8ef9f5f2fdf22bce0ad960ed"
+  "version": "1.11.9",
+  "vsixUrl": "/releases/techword-code-1.11.9.vsix",
+  "notes": "Smoother, more reliable runs: fixes a rare mid-run stall that could leave a task looking stuck, lets image/file-only messages send (no more hang on an attachment with no text), keeps a live status while background agents and long commands run so it never looks frozen, and clears the Brain reasoning trail when you switch chats so old thinking never carries over. Plus security hardening (command-safety, secret redaction, update checks).",
+  "sha256": "ddee20b6b96480f4e797ae62db4846a0b4fd2790084a83c9b38aaf2f20951cc7"
 }

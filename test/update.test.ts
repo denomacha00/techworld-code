@@ -41,6 +41,16 @@ test('parseManifest rejects junk so a bad server response is never treated as a 
   assert.equal(parseManifest({ version: 'latest', vsixUrl: '/x.vsix' }), undefined, 'non-numeric version');
 });
 
+test('parseManifest rejects a version carrying path-traversal or shell metacharacters', () => {
+  // The version is interpolated into a vsix filename/path downstream; an unanchored check let "1.0.0/../x"
+  // through. It must be digits-and-dots (optionally v-prefixed / -prerelease) and nothing else.
+  for (const version of ['1.0.0/../../etc/passwd', '1.0.0; rm -rf ~', '1.0.0 && curl evil', '../1.0.0', '1.0.0\n2.0.0', '1.0.0/latest']) {
+    assert.equal(parseManifest({ version, vsixUrl: '/x.vsix' }), undefined, `${JSON.stringify(version)} must be rejected`);
+  }
+  // A legitimate prerelease tag is still accepted.
+  assert.equal(parseManifest({ version: '1.12.0-beta.1', vsixUrl: '/x.vsix' })?.version, '1.12.0-beta.1');
+});
+
 test('resolveVsixUrl resolves a relative path against the manifest and forces https', () => {
   assert.equal(
     resolveVsixUrl('https://up.example.app/latest.json', '/releases/techword-code-1.8.0.vsix'),
